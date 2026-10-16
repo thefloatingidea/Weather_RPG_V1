@@ -1021,6 +1021,9 @@ class WeatherSceneGame extends FlameGame with TapCallbacks, LongPressCallbacks {
     super.update(dt);
     _elapsed += dt;
     _behavior.update(dt, _characterContext);
+    final activeScenario = config.scenario;
+    if (activeScenario != null) {
+      _behavior.reactToScenario(activeScenario);
     for (final creature in _ambientCreatures) {
       creature.update(dt, _ambientRandom);
     }
@@ -3493,19 +3496,26 @@ class WeatherSceneGame extends FlameGame with TapCallbacks, LongPressCallbacks {
         : sprites.idleFrameAt(_elapsed);
     final dest = ui.Rect.fromLTWH(
         spriteLeft, spriteTop, spriteWidth, spriteHeight);
-    canvas.save();
-    if (_walkingLeft) {
-      canvas.translate(x, floor);
-      canvas.scale(-1, 1);
-      canvas.translate(-x, -floor);
+
+    // Draws the current frame, mirrored when he walks left. Used for the body
+    // and for every mask layer below so tints and light always line up.
+    void renderSprite(ui.Paint paint) {
+      canvas.save();
+      if (_walkingLeft) {
+        canvas.translate(x, floor);
+        canvas.scale(-1, 1);
+        canvas.translate(-x, -floor);
+      }
+      sprite.render(
+        canvas,
+        position: Vector2(dest.left, dest.top),
+        size: Vector2(dest.width, dest.height),
+        overridePaint: paint,
+      );
+      canvas.restore();
     }
-    sprite.render(
-      canvas,
-      position: Vector2(dest.left, dest.top),
-      size: Vector2(dest.width, dest.height),
-      overridePaint: ui.Paint()..filterQuality = ui.FilterQuality.none,
-    );
-    canvas.restore();
+
+    renderSprite(ui.Paint()..filterQuality = ui.FilterQuality.none);
 
     // Weather tinting replaces the procedural body recolouring. It is applied
     // inside a layer with srcATop so the wash lands on the character's pixels
@@ -3521,23 +3531,62 @@ class WeatherSceneGame extends FlameGame with TapCallbacks, LongPressCallbacks {
     if (tint != null && tint.a > 0) {
       final bounds = dest.inflate(unit * 2);
       canvas.saveLayer(bounds, ui.Paint());
-      sprite.render(
-        canvas,
-        position: Vector2(dest.left, dest.top),
-        size: Vector2(dest.width, dest.height),
-        overridePaint: ui.Paint()..filterQuality = ui.FilterQuality.none,
-      );
+      renderSprite(ui.Paint()..filterQuality = ui.FilterQuality.none);
       // The sprite drawn a second time with plain srcIn supplies the alpha mask,
       // so the wash lands on the character's pixels only.
-      sprite.render(
-        canvas,
-        position: Vector2(dest.left, dest.top),
-        size: Vector2(dest.width, dest.height),
-        overridePaint: ui.Paint()
-          ..color = tint
+      renderSprite(ui.Paint()
+        ..color = tint
+        ..blendMode = ui.BlendMode.srcIn);
+      canvas.restore();
+    }
+
+    // Dynamic light on the character: a warm lantern glow along his left side
+    // (the lantern hangs there) and a brief cool flash while lightning
+    // strikes. Each light is a gradient masked to the sprite's own pixels, so
+    // it never spills past his outline or hides the heat/cold tint beneath.
+    void lightWash(ui.Shader shader) {
+      final bounds = dest.inflate(unit * 2);
+      canvas.saveLayer(bounds, ui.Paint());
+      renderSprite(ui.Paint()..filterQuality = ui.FilterQuality.none);
+      canvas.drawRect(
+        bounds,
+        ui.Paint()
+          ..shader = shader
           ..blendMode = ui.BlendMode.srcIn,
       );
       canvas.restore();
+    }
+
+    final lanternGlow = !_desertHeat &&
+        !_sandstorm &&
+        (!isDay || _storm || _fog || nearMiss);
+    if (lanternGlow && !hit) {
+      final flicker = .85 + .15 * math.sin(_elapsed * 4);
+      final strength = (nearMiss ? 150 : 105) * flicker;
+      final lit = ui.Color.fromARGB(
+          strength.round().clamp(0, 255).toInt(), 255, 176, 74);
+      final bounds = dest.inflate(unit * 2);
+      lightWash(ui.Gradient.linear(
+        ui.Offset(bounds.left, 0),
+        ui.Offset(bounds.right, 0),
+        [lit, lit.withAlpha(0)],
+        const [0.0, .62],
+      ));
+    }
+    if (_thunderstorm && _strikeAge < .34) {
+      final fade = (1 - _strikeAge / .34).clamp(0.0, 1.0).toDouble() *
+          (reduceFlashing ? .35 : 1.0);
+      final bounds = dest.inflate(unit * 2);
+      lightWash(ui.Gradient.linear(
+        ui.Offset(0, bounds.top),
+        ui.Offset(0, bounds.bottom),
+        [
+          ui.Color.fromARGB((210 * fade).round().clamp(0, 255).toInt(), 232,
+              243, 255),
+          ui.Color.fromARGB((90 * fade).round().clamp(0, 255).toInt(), 150,
+              190, 255),
+        ],
+      ));
     }
 
     _drawGoblinEffects(canvas, w, h,
