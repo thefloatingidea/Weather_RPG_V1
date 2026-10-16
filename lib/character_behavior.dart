@@ -1,4 +1,5 @@
 import 'dart:math' as math;
+import 'goblin_scenarios.dart';
 
 enum GoblinBehaviorState {
   idle,
@@ -41,7 +42,7 @@ class CharacterTemperament {
   final double caution;
   final double sleepiness;
 
-  Map<String, Object> toJson() => {
+  Map<String, dynamic> toJson() => {
         'curiosity': curiosity,
         'playfulness': playfulness,
         'caution': caution,
@@ -51,6 +52,7 @@ class CharacterTemperament {
   factory CharacterTemperament.fromJson(Map<String, dynamic>? json) {
     double read(String key, double fallback) =>
         ((json?[key] as num?)?.toDouble() ?? fallback).clamp(0.0, 1.0);
+
     return CharacterTemperament(
       curiosity: read('curiosity', .72),
       playfulness: read('playfulness', .64),
@@ -86,14 +88,14 @@ class CharacterJournalEvent {
   final String detail;
   final DateTime at;
 
-  Map<String, Object> toJson() => {
+  Map<String, dynamic> toJson() => {
         'id': id,
         'title': title,
         'detail': detail,
         'at': at.toIso8601String(),
       };
 
-  factory CharacterJournalEvent.fromJson(Map<String, dynamic> json) =>
+  factory CharacterJournalEvent.fromJson(Map<dynamic, dynamic> json) =>
       CharacterJournalEvent(
         id: json['id'] as String? ?? '',
         title: json['title'] as String? ?? 'A day in the weather',
@@ -103,6 +105,8 @@ class CharacterJournalEvent {
 }
 
 class CharacterProfile {
+  static const currentSchemaVersion = 2;
+
   const CharacterProfile({
     this.temperament = const CharacterTemperament(),
     this.visitedLocations = const {},
@@ -111,6 +115,7 @@ class CharacterProfile {
     this.weatherExperiences = const {},
     this.recentEvents = const [],
     this.currentLocationId,
+    this.schemaVersion = currentSchemaVersion,
   });
 
   final CharacterTemperament temperament;
@@ -120,8 +125,11 @@ class CharacterProfile {
   final Set<String> weatherExperiences;
   final List<CharacterJournalEvent> recentEvents;
   final String? currentLocationId;
+  final int schemaVersion;
 
-  Map<String, Object?> toJson() => {
+  Map<String, dynamic> toJson() => {
+        'schemaVersion': currentSchemaVersion,
+        'temperament': temperament.toJson(),
         'visitedLocations': visitedLocations.toList(),
         'visitCounts': visitCounts,
         'discoveries': discoveries.toList(),
@@ -130,22 +138,31 @@ class CharacterProfile {
         'currentLocationId': currentLocationId,
       };
 
-  factory CharacterProfile.fromJson(Map<String, dynamic> json) {
+  factory CharacterProfile.fromJson(Map<dynamic, dynamic> json) {
     Set<String> readSet(String key) =>
-        (json[key] as List<dynamic>? ?? const []).whereType<String>().toSet();
-    final events = (json['recentEvents'] as List<dynamic>? ?? const [])
+        (json[key] as List? ?? const []).whereType<String>().toSet();
+
+    final events = (json['recentEvents'] as List? ?? const [])
         .whereType<Map>()
-        .map((event) =>
-            CharacterJournalEvent.fromJson(Map<String, dynamic>.from(event)))
+        .map((event) => CharacterJournalEvent.fromJson(event))
         .toList();
-    final rawVisitCounts = json['visitCounts'] as Map<String, dynamic>? ?? {};
+
+    final rawVisitCounts = json['visitCounts'] as Map? ?? {};
+
+    // Schema v1 never saved a temperament. v2+ round-trips it.
+    final version = (json['schemaVersion'] as num?)?.toInt() ?? 1;
+    final temperament = version >= 2
+        ? CharacterTemperament.fromJson(
+            json['temperament'] as Map<String, dynamic>?,
+          )
+        : const CharacterTemperament();
+
     return CharacterProfile(
-      // Ignore temperament values saved by earlier versions. The goblin has
-      // one shared default personality for every player.
-      temperament: const CharacterTemperament(),
+      temperament: temperament,
       visitedLocations: readSet('visitedLocations'),
-      visitCounts: rawVisitCounts
-          .map((key, value) => MapEntry(key, (value as num).toInt())),
+      visitCounts: rawVisitCounts.map(
+        (key, value) => MapEntry(key as String, (value as num).toInt()),
+      ),
       discoveries: readSet('discoveries'),
       weatherExperiences: readSet('weatherExperiences'),
       recentEvents: events.take(60).toList(),
@@ -174,7 +191,11 @@ class CharacterProfile {
     void add(String id, String title, String detail) {
       if (unlocked.add(id)) {
         final event = CharacterJournalEvent(
-            id: id, title: title, detail: detail, at: date);
+          id: id,
+          title: title,
+          detail: detail,
+          at: date,
+        );
         events.insert(0, event);
         added.add(event);
       }
@@ -184,16 +205,22 @@ class CharacterProfile {
       final returning = visits.contains(locationId);
       final visitNumber = (counts[locationId] ?? 0) + 1;
       counts[locationId] = visitNumber;
+
       add(
-          'visit:$locationId:$visitNumber',
-          returning ? 'Back in $locationName' : 'Visited $locationName',
-          returning
-              ? 'The goblin recognized this weather world.'
-              : 'A new place joined the goblin’s map.');
+        'visit:$locationId:$visitNumber',
+        returning ? 'Back in $locationName' : 'Visited $locationName',
+        returning
+            ? 'The goblin recognized this weather world.'
+            : 'A new place joined the goblin’s map.',
+      );
       visits.add(locationId);
+
       if (landmarkId != 'none') {
-        add('landmark:$locationId:$landmarkId', 'Spotted $landmarkName',
-            'The goblin took a moment to study the landmark.');
+        add(
+          'landmark:$locationId:$landmarkId',
+          'Spotted $landmarkName',
+          'The goblin took a moment to study the landmark.',
+        );
       }
     }
 
@@ -201,20 +228,27 @@ class CharacterProfile {
       final key = weatherKey == 'storm' ? 'thunderstorm' : 'rain';
       if (experiences.add(key)) {
         add(
-            'weather:$key',
-            key == 'thunderstorm' ? 'First thunderstorm' : 'First rain',
-            key == 'thunderstorm'
-                ? 'A rumble became part of the goblin’s weather memories.'
-                : 'The goblin met the rain and kept exploring.');
+          'weather:$key',
+          key == 'thunderstorm' ? 'First thunderstorm' : 'First rain',
+          key == 'thunderstorm'
+              ? 'A rumble became part of the goblin’s weather memories.'
+              : 'The goblin met the rain and kept exploring.',
+        );
       }
     } else if (weatherKey == 'snow' && experiences.add('snow')) {
-      add('weather:snow', 'First snowfall',
-          'The goblin remembers the first flakes of snow.');
+      add(
+        'weather:snow',
+        'First snowfall',
+        'The goblin remembers the first flakes of snow.',
+      );
     }
 
     if (experiences.add('season:$season')) {
-      add('season:$season', 'Season discovered: $season',
-          'A new seasonal world appeared on the goblin’s travels.');
+      add(
+        'season:$season',
+        'Season discovered: $season',
+        'A new seasonal world appeared on the goblin’s travels.',
+      );
     }
 
     return ProfileUpdate(
@@ -234,6 +268,7 @@ class CharacterProfile {
 
 class ProfileUpdate {
   const ProfileUpdate(this.profile, this.addedEvents);
+
   final CharacterProfile profile;
   final List<CharacterJournalEvent> addedEvents;
 }
@@ -250,28 +285,16 @@ class CharacterProgress {
     required this.discoveryCount,
   });
 
-  /// Catalogued landmark ids the goblin has studied, e.g. `tajMahal`.
   final Set<String> landmarkIds;
-
-  /// Keys into `weatherBadgeCatalog` that have been experienced.
   final Set<String> weatherKeys;
-
-  /// How many distinct weather worlds have been entered.
   final int locationsVisited;
-
-  /// Total recorded visits, including repeat visits.
   final int totalVisits;
-
-  /// Visit count per location id, for a "most visited" line.
   final Map<String, int> visitCounts;
-
-  /// Raw discovery count, which includes visits as well as landmarks.
   final int discoveryCount;
 
   bool get hasAnyProgress =>
       landmarkIds.isNotEmpty || weatherKeys.isNotEmpty || locationsVisited > 0;
 
-  /// The location id visited most often, or null when nothing has been visited.
   String? get favouriteLocationId {
     if (visitCounts.isEmpty) return null;
     final best = visitCounts.entries
@@ -290,29 +313,31 @@ class CharacterProgress {
 }
 
 extension CharacterProgressReader on CharacterProfile {
-  /// Derives the collection state from the profile's recorded sets.
-  ///
-  /// Landmarks live inside `discoveries` as `landmark:<locationId>:<landmarkId>`
-  /// entries, which is why this parsing exists rather than a dedicated field.
   CharacterProgress get progress {
     final landmarks = <String>{};
     for (final discovery in discoveries) {
       if (!discovery.startsWith('landmark:')) continue;
       final parts = discovery.split(':');
-      if (parts.length >= 3 && parts[2].isNotEmpty) landmarks.add(parts[2]);
+      if (parts.length >= 3 && parts[2].isNotEmpty) {
+        landmarks.add(parts[2]);
+      }
     }
+
     final weather = <String>{};
     for (final experience in weatherExperiences) {
-      if (experience.startsWith('season:') || experience == 'rain' ||
-          experience == 'thunderstorm' || experience == 'snow') {
+      if (experience.startsWith('season:') ||
+          experience == 'rain' ||
+          experience == 'thunderstorm' ||
+          experience == 'snow') {
         weather.add(experience);
       }
     }
+
     return CharacterProgress(
       landmarkIds: landmarks,
       weatherKeys: weather,
       locationsVisited: visitedLocations.length,
-      totalVisits: visitCounts.values.fold<int>(0, (sum, value) => sum + value),
+      totalVisits: visitCounts.values.fold(0, (sum, value) => sum + value),
       visitCounts: visitCounts,
       discoveryCount: discoveries.length,
     );
@@ -374,7 +399,9 @@ class CharacterBehaviorController {
   int revision = 0;
   int taps = 0;
   String? actionTarget;
+
   String _lastWeatherKey = '';
+  String? _lastScenarioTitle;
   double _idleWait = 1.4;
   double _interactionCooldown = 0;
   double _weatherReactionCooldown = 0;
@@ -384,14 +411,17 @@ class CharacterBehaviorController {
 
   bool get isWalking => state == GoblinBehaviorState.walk;
   bool get isSleeping => state == GoblinBehaviorState.sleep;
+
   double get actionProgress => stateDuration <= 0
       ? 1
       : (stateAge / stateDuration).clamp(0.0, 1.0).toDouble();
 
   void update(double dt, CharacterSceneContext context) {
     final step = dt.clamp(0.0, .1).toDouble();
+
     _interactionCooldown = math.max(0, _interactionCooldown - step);
     _weatherReactionCooldown = math.max(0, _weatherReactionCooldown - step);
+
     _blinkAge += step;
     if (_blinkAge >= _blinkWait) {
       blinkAmount = _blinkAge - _blinkWait < .13 ? 1 : 0;
@@ -412,22 +442,30 @@ class CharacterBehaviorController {
       final old = _lastWeatherKey;
       _lastWeatherKey = context.weatherKey;
       if (_isReactionWeather(context.weatherKey)) {
-        _startWeatherReaction(context.weatherKey,
-            emergency: context.criticalWeather);
+        _startWeatherReaction(
+          context.weatherKey,
+          emergency: context.criticalWeather,
+        );
       } else if (_isReactionWeather(old)) {
-        _enter(GoblinBehaviorState.lookAround, 1.8,
-            mood: GoblinMood.calm, target: 'clearing sky');
+        _enter(
+          GoblinBehaviorState.lookAround,
+          1.8,
+          mood: GoblinMood.calm,
+          target: 'clearing sky',
+        );
         headTurn = -.18;
         gazeY = -.3;
       }
     }
 
     stateAge += step;
+
     if (state == GoblinBehaviorState.walk) {
       walkAmount = walkDirection * .055 * math.sin(math.pi * actionProgress);
     } else {
       walkAmount = 0;
     }
+
     if (state != GoblinBehaviorState.idle && stateAge >= stateDuration) {
       if (state == GoblinBehaviorState.recover) {
         _enter(GoblinBehaviorState.idle, 0, mood: GoblinMood.calm);
@@ -436,22 +474,27 @@ class CharacterBehaviorController {
         _enter(GoblinBehaviorState.recover, .55, mood: GoblinMood.calm);
       }
     }
+
     if (state == GoblinBehaviorState.idle) {
       _idleWait -= step;
       if (_idleWait <= 0) _chooseIdle(context);
     }
   }
 
-  bool interact(
-      {bool longPress = false, required CharacterSceneContext context}) {
+  bool interact({
+    bool longPress = false,
+    required CharacterSceneContext context,
+  }) {
     if (context.criticalWeather ||
         state == GoblinBehaviorState.weatherReact ||
         state == GoblinBehaviorState.recover ||
         _interactionCooldown > 0) {
       return false;
     }
+
     _interactionCooldown = 1.0;
     taps++;
+
     if (isSleeping) {
       _sleepTaps++;
       if (_sleepTaps < 2) {
@@ -461,7 +504,9 @@ class CharacterBehaviorController {
       }
       _sleepTaps = 0;
     }
+
     final play = longPress || (taps % 4 == 0 && temperament.playfulness > .52);
+
     _enter(
       play ? GoblinBehaviorState.play : GoblinBehaviorState.interact,
       play ? 2.2 : 1.8,
@@ -478,13 +523,83 @@ class CharacterBehaviorController {
     if (_weatherReactionCooldown > 0 && !directHit) return;
     _weatherReactionCooldown = directHit ? 7 : 5;
     _enter(
-        directHit
-            ? GoblinBehaviorState.recover
-            : GoblinBehaviorState.weatherReact,
-        directHit ? 1.5 + temperament.caution * .7 : 1.2,
-        mood: GoblinMood.surprised,
-        target: 'thunder');
+      directHit ? GoblinBehaviorState.recover : GoblinBehaviorState.weatherReact,
+      directHit ? 1.5 + temperament.caution * .7 : 1.2,
+      mood: GoblinMood.surprised,
+      target: 'thunder',
+    );
   }
+
+    /// Aligns the controller with a scenario picked by `pickScenario`.
+  ///
+  /// Safe to call from `update` on every frame: repeated calls with the same
+  /// scenario are ignored, so a rebuild cannot restart the same pose
+  /// mid-animation. Player interactions and live weather reactions outrank a
+  /// scenario cue, so a scenario never interrupts a tap or a lightning flinch.
+  void reactToScenario(GoblinScenario scenario) {
+    if (scenario.title == _lastScenarioTitle) return;
+
+    // A live emergency or a player gesture owns the character right now.
+    // Let it finish rather than snapping to a new pose underneath it.
+    if (_weatherReactionCooldown > 1.5) return;
+    if (_interactionCooldown > 0) return;
+
+    _lastScenarioTitle = scenario.title;
+
+    _enter(
+      scenario.state,
+      _scenarioDuration(scenario.state),
+      mood: scenario.mood,
+      target: scenario.title,
+    );
+
+    // Some states read better with an initial head or eye offset — without
+    // one, "lookAround" stares straight ahead, which is the pose the scenario
+    // text is trying to distinguish itself from.
+    switch (scenario.state) {
+      case GoblinBehaviorState.lookAround:
+        headTurn = _random.nextBool() ? .18 : -.18;
+        gazeX = headTurn.sign * .6;
+        gazeY = scenario.mood == GoblinMood.curious ? -.35 : .05;
+      case GoblinBehaviorState.inspect:
+      case GoblinBehaviorState.landmarkReact:
+        headTurn = .16;
+        gazeX = .7;
+        gazeY = .15;
+      case GoblinBehaviorState.rest:
+        gazeY = .18;
+        headTurn = 0;
+      case GoblinBehaviorState.sleep:
+        gazeY = .5;
+        headTurn = 0;
+      case GoblinBehaviorState.weatherReact:
+        gazeY = -.25;
+      case GoblinBehaviorState.walk:
+        walkDirection = _random.nextBool() ? 1 : -1;
+      default:
+        break;
+    }
+  }
+
+  /// Natural duration for each scenario state, in seconds.
+  ///
+  /// Deliberately a touch longer than the idle-choice durations in
+  /// `_chooseIdle`, so a scenario pose reads as intentional rather than as
+  /// one of the wandering idle animations.
+  double _scenarioDuration(GoblinBehaviorState s) => switch (s) {
+        GoblinBehaviorState.idle => 2.0,
+        GoblinBehaviorState.lookAround => 2.4,
+        GoblinBehaviorState.walk => 2.8,
+        GoblinBehaviorState.yawn => 1.7,
+        GoblinBehaviorState.inspect => 2.3,
+        GoblinBehaviorState.play => 2.1,
+        GoblinBehaviorState.weatherReact => 1.9,
+        GoblinBehaviorState.landmarkReact => 2.5,
+        GoblinBehaviorState.interact => 1.8,
+        GoblinBehaviorState.rest => 2.7,
+        GoblinBehaviorState.sleep => 4.5,
+        GoblinBehaviorState.recover => .6,
+      };
 
   void _startWeatherReaction(String key, {required bool emergency}) {
     _weatherReactionCooldown = emergency ? 8 : 5;
@@ -495,9 +610,13 @@ class CharacterBehaviorController {
       'wind' || 'sand' || 'fog' => GoblinMood.cautious,
       _ => GoblinMood.curious,
     };
-    _enter(GoblinBehaviorState.weatherReact,
-        (emergency ? 2.1 : 1.6) + temperament.caution * .7,
-        mood: mood, target: key);
+
+    _enter(
+      GoblinBehaviorState.weatherReact,
+      (emergency ? 2.1 : 1.6) + temperament.caution * .7,
+      mood: mood,
+      target: key,
+    );
     headTurn = key == 'wind' || key == 'sand' ? .2 : -.1;
     gazeY = key == 'snow' ? -.35 : 0;
   }
@@ -505,8 +624,7 @@ class CharacterBehaviorController {
   bool _isReactionWeather(String key) => key != 'clear';
 
   void _chooseIdle(CharacterSceneContext context) {
-    final choices =
-        <(GoblinBehaviorState, double, double, GoblinMood, String?)>[
+    final choices = <(GoblinBehaviorState, double, double, GoblinMood, String?)>[
       (GoblinBehaviorState.lookAround, 1.5, 2.4, GoblinMood.curious, null),
       (GoblinBehaviorState.walk, 1.8, 3.0, GoblinMood.curious, null),
       (
@@ -534,54 +652,75 @@ class CharacterBehaviorController {
       ),
       (GoblinBehaviorState.yawn, 1.2, 1.8, GoblinMood.sleepy, 'yawn'),
     ];
-    final weighted =
-        <(GoblinBehaviorState, double, double, GoblinMood, String?)>[];
-    void repeatChoice(int count,
-        (GoblinBehaviorState, double, double, GoblinMood, String?) choice) {
+
+    final weighted = <(GoblinBehaviorState, double, double, GoblinMood, String?)>[];
+
+    void repeatChoice(
+      int count,
+      (GoblinBehaviorState, double, double, GoblinMood, String?) choice,
+    ) {
       for (var i = 0; i < count; i++) {
         weighted.add(choice);
       }
     }
 
     repeatChoice(
-        2 +
-            (temperament.curiosity * 4).round() +
-            (temperament.caution * 3).round(),
-        choices[0]);
+      2 + (temperament.curiosity * 4).round() + (temperament.caution * 3).round(),
+      choices[0],
+    );
+
     if (!context.reducedMotion) {
       repeatChoice(1 + (temperament.curiosity * 5).round(), choices[1]);
     }
+
     final target = _visibleTarget(context);
     if (target != null) {
-      repeatChoice(1 + (temperament.curiosity * 5).round(),
-          (GoblinBehaviorState.inspect, 1.5, 2.5, GoblinMood.curious, target));
+      repeatChoice(
+        1 + (temperament.curiosity * 5).round(),
+        (GoblinBehaviorState.inspect, 1.5, 2.5, GoblinMood.curious, target),
+      );
     }
+
     final playTarget = _playTarget(context);
     if (playTarget != null && !context.reducedMotion) {
-      repeatChoice(1 + (temperament.playfulness * 6).round(),
-          (GoblinBehaviorState.play, 1.3, 2.1, GoblinMood.playful, playTarget));
+      repeatChoice(
+        1 + (temperament.playfulness * 6).round(),
+        (GoblinBehaviorState.play, 1.3, 2.1, GoblinMood.playful, playTarget),
+      );
     }
+
     if (context.morning) {
       repeatChoice(
-          2, (GoblinBehaviorState.rest, 1.7, 3.0, GoblinMood.happy, 'stretch'));
+        2,
+        (GoblinBehaviorState.rest, 1.7, 3.0, GoblinMood.happy, 'stretch'),
+      );
       repeatChoice(1 + (temperament.sleepiness * 2).round(), choices[7]);
     }
+
     if (context.night) {
       repeatChoice(1 + (temperament.sleepiness * 8).round(), choices[5]);
       repeatChoice(1 + (temperament.sleepiness * 3).round(), choices[4]);
       repeatChoice(1 + (temperament.sleepiness * 2).round(), choices[7]);
     }
+
     if (weighted.isEmpty) {
       _idleWait = 2;
       return;
     }
+
     final choice = weighted[_random.nextInt(weighted.length)];
+
     if (choice.$1 == GoblinBehaviorState.walk) {
       walkDirection = _random.nextBool() ? 1 : -1;
     }
+
     _enter(
-        choice.$1, choice.$2 + _random.nextDouble() * (choice.$3 - choice.$2),
-        mood: choice.$4, target: choice.$5);
+      choice.$1,
+      choice.$2 + _random.nextDouble() * (choice.$3 - choice.$2),
+      mood: choice.$4,
+      target: choice.$5,
+    );
+
     if (choice.$1 == GoblinBehaviorState.lookAround) {
       final scratch = _random.nextDouble() < .16;
       if (scratch) actionTarget = 'scratch';

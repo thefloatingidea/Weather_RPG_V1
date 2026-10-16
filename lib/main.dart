@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'widgets/weather_error_view.dart';
 
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
@@ -12,9 +14,9 @@ import 'world_catalog.dart';
 import 'weather_rules.dart';
 import 'character_behavior.dart';
 import 'weather_api.dart';
+import 'goblin_scenarios.dart';
 
-void main() => runApp(const WeatherRpgApp());
-
+void main() => runApp(const ProviderScope(child: WeatherRpgApp()));
 const Color night = Color(0xFF17121A);
 const Color panel = Color(0xFF2B2027);
 const Color panel2 = Color(0xFF3A2926);
@@ -387,14 +389,14 @@ class _NicknameDialogState extends State<_NicknameDialog> {
     );
   }
 }
-class WeatherRpgApp extends StatefulWidget {
-  const WeatherRpgApp({super.key});
 
+class WeatherRpgApp extends ConsumerStatefulWidget {
+  const WeatherRpgApp({super.key});
   @override
-  State<WeatherRpgApp> createState() => _WeatherRpgAppState();
+  ConsumerState<WeatherRpgApp> createState() => _WeatherRpgAppState();
 }
 
-class _WeatherRpgAppState extends State<WeatherRpgApp> {
+class _WeatherRpgAppState extends ConsumerState<WeatherRpgApp> {
   ThemeMode themeMode = ThemeMode.dark;
   final SharedPreferencesAsync _prefs = SharedPreferencesAsync();
 
@@ -467,7 +469,7 @@ class _WeatherRpgAppState extends State<WeatherRpgApp> {
   }
 }
 
-class WeatherHome extends StatefulWidget {
+class WeatherHome extends ConsumerStatefulWidget {
   final ValueChanged<ThemeMode> onThemeChanged;
   final ThemeMode themeMode;
   const WeatherHome({
@@ -475,17 +477,16 @@ class WeatherHome extends StatefulWidget {
     required this.onThemeChanged,
     required this.themeMode,
   });
-
   @override
-  State<WeatherHome> createState() => _WeatherHomeState();
+  ConsumerState<WeatherHome> createState() => _WeatherHomeState();
 }
 
-class _WeatherHomeState extends State<WeatherHome>
+class _WeatherHomeState extends ConsumerState<WeatherHome>
     with TickerProviderStateMixin {
   late final AnimationController _weatherAnimation;
   WeatherBundle? _weather;
   bool _loading = true;
-  String? _error;
+  Object? _error;
   int _tab = 0;
   String _city = 'Mumbai';
   String _region = 'Maharashtra, India';
@@ -504,8 +505,8 @@ class _WeatherHomeState extends State<WeatherHome>
     ),
   ];
   final SharedPreferencesAsync _prefs = SharedPreferencesAsync();
-  final WeatherApiClient _weatherApi =
-      const WeatherApiClient(apiKey: weatherApiKey);
+  
+final WeatherApiClient _weatherApi = const WeatherApiClient();
   static const _weatherCacheKey = 'weatherapi_cache_v1';
   DateTime? _lastUpdated;
   bool _usingCachedWeather = false;
@@ -819,7 +820,7 @@ class _WeatherHomeState extends State<WeatherHome>
     } catch (error) {
       if (!mounted || requestId != _weatherRequestId) return;
       setState(() {
-        _error = error.toString().replaceFirst('Exception: ', '');
+        _error = error;
         _loading = false;
       });
     }
@@ -861,6 +862,7 @@ class _WeatherHomeState extends State<WeatherHome>
         _lon = lon;
         _tab = 0;
         _weather = null;
+        _loading = true;
         _lastUpdated = null;
         _usingCachedWeather = false;
         _sceneWeatherPreviousKey = '';
@@ -927,6 +929,7 @@ class _WeatherHomeState extends State<WeatherHome>
       _lon = result.longitude;
       _tab = 0;
       _weather = null;
+      _loading = true;
       _lastUpdated = null;
       _usingCachedWeather = false;
       _sceneWeatherPreviousKey = '';
@@ -1146,19 +1149,13 @@ class _WeatherHomeState extends State<WeatherHome>
                               ? ListView(
                                   physics:
                                       const AlwaysScrollableScrollPhysics(),
-                                  padding: const EdgeInsets.all(24),
                                   children: [
-                                    const SizedBox(height: 100),
-                                    Icon(Icons.cloud_off,
-                                        size: 56, color: palette.accent),
-                                    const SizedBox(height: 16),
-                                    Text(_error!, textAlign: TextAlign.center),
-                                    const SizedBox(height: 16),
-                                    Center(
-                                      child: FilledButton.icon(
-                                        onPressed: _fetchWeather,
-                                        icon: const Icon(Icons.refresh),
-                                        label: const Text('Retry'),
+                                    SizedBox(
+                                      height: MediaQuery.of(context).size.height *
+                                          0.6,
+                                      child: WeatherErrorView(
+                                        error: _error!,
+                                        onRetry: _fetchWeather,
                                       ),
                                     ),
                                   ],
@@ -1313,15 +1310,37 @@ class _WeatherHomeState extends State<WeatherHome>
     final windKmh = (c['wind_speed_10m'] as num?)?.toDouble() ?? 0;
     final precipitationMm = (c['precipitation'] as num?)?.toDouble() ?? 0;
     final season = worldSeasonForMonth(sceneMonth, _lat);
-    final scenario = _weatherScenario(
-      code: code,
-      temperatureC: temperatureC,
-      windKmh: windKmh,
-      precipitationMm: precipitationMm,
-      aridRegion: _worldLocation.isArid,
-      seasonalFoliage: _worldLocation.seasonalFoliage,
-      season: season,
-    );
+   final scenario = pickScenario(
+  ctx: ScenarioContext(
+    weatherCode: code,
+    isDay: isDay,
+    temperatureC: temperatureC,
+    windKmh: windKmh,
+    precipitationMm: precipitationMm,
+    biome: _worldLocation.biome,
+    landmark: _worldLocation.landmark,
+    season: season,
+    visitCount: _characterProfile.visitCounts[_worldLocation.id] ?? 1,
+    hourOfDay: sceneDate?.hour ?? DateTime.now().hour,
+    isFirstRainHere:
+        !_characterProfile.weatherExperiences.contains('rain'),
+    isFirstSnowHere:
+        !_characterProfile.weatherExperiences.contains('snow'),
+    isFirstStormHere:
+        !_characterProfile.weatherExperiences.contains('thunderstorm'),
+  ),
+  temperament: _characterProfile.temperament,
+   seed: Object.hash(
+    _worldLocation.id,
+    code,
+    isDay,
+    (temperatureC * 10).round(),
+    (windKmh / 5).round(),
+    (precipitationMm * 10).round(),
+    sceneDate?.hour ?? DateTime.now().hour,
+    _characterProfile.weatherExperiences.length,
+  ),
+);
     // Use the tropical ocean scene on warm, clear daytime conditions.
     // Normalized clear codes represent clear / mostly clear skies.
     final summerClear = isDay && [0, 1].contains(code) && temperatureC >= 25.0;
@@ -1370,7 +1389,7 @@ class _WeatherHomeState extends State<WeatherHome>
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Icon(scenario.$3, color: palette.accent, size: 23),
+              Text(scenario.emoji, style: const TextStyle(fontSize: 22)),
               const SizedBox(width: 10),
               Expanded(
                 child: Column(
@@ -1386,24 +1405,32 @@ class _WeatherHomeState extends State<WeatherHome>
                       ),
                     ),
                     const SizedBox(height: 3),
-                    Text(
-                      scenario.$1.toUpperCase(),
-                      style: TextStyle(
-                        color: palette.frameBottom,
-                        fontSize: 12,
-                        fontWeight: FontWeight.w900,
-                        letterSpacing: .5,
-                      ),
-                    ),
-                    const SizedBox(height: 3),
-                    Text(
-                      scenario.$2,
-                      style: TextStyle(
-                        color: palette.frameBottom.withOpacity(.84),
-                        fontSize: 12,
-                        height: 1.25,
-                      ),
-                    ),
+                    Row(
+  children: [
+    Text(scenario.emoji, style: const TextStyle(fontSize: 14)),
+    const SizedBox(width: 6),
+    Expanded(
+      child: Text(
+        scenario.title.toUpperCase(),
+        style: TextStyle(
+          color: palette.frameBottom,
+          fontSize: 12,
+          fontWeight: FontWeight.w900,
+          letterSpacing: .5,
+        ),
+      ),
+    ),
+  ],
+),
+const SizedBox(height: 3),
+Text(
+  scenario.body,
+  style: TextStyle(
+    color: palette.frameBottom.withValues(alpha: .84),
+    fontSize: 12,
+    height: 1.25,
+  ),
+),
                   ],
                 ),
               ),
@@ -1461,6 +1488,7 @@ class _WeatherHomeState extends State<WeatherHome>
                       location: _worldLocation,
                       environment: _sceneEnvironment,
                       reduceFlashing: _reduceFlashing,
+                      scenario: scenario, 
                     ),
                   ),
                   // Lightweight HUD stays in Flutter; the entire animated world
@@ -1605,126 +1633,7 @@ class _WeatherHomeState extends State<WeatherHome>
     );
   }
 
-  (String, String, IconData) _weatherScenario({
-    required int code,
-    required double temperatureC,
-    required double windKmh,
-    required double precipitationMm,
-    required bool aridRegion,
-    required bool seasonalFoliage,
-    required WorldSeason season,
-  }) {
-    const rainCodes = [
-      51,
-      53,
-      55,
-      56,
-      57,
-      61,
-      63,
-      65,
-      66,
-      67,
-      80,
-      81,
-      82,
-      95,
-      96,
-      99,
-    ];
-    if (windKmh >= galeWindThresholdKmh && rainCodes.contains(code)) {
-      return (
-        'Scarf vs. gale',
-        'He leans into the gusts while his scarf auditions to become a windsock.',
-        Icons.air,
-      );
-    }
-    if (aridRegion && const [30, 31, 32, 33, 34, 35].contains(code)) {
-      return (
-        'Dusty forecast',
-        'He puts on his goggles. The sand still manages to find his sandwich.',
-        Icons.air,
-      );
-    }
-    if (const [95, 96, 99].contains(code)) {
-      return (
-        'Lantern flinch',
-        'Lightning flashes. He freezes with his lantern while his shadow jumps first.',
-        Icons.thunderstorm_outlined,
-      );
-    }
-    if (const [71, 73, 75, 77, 85, 86].contains(code)) {
-      return (
-        'Frosty-footed trek',
-        'He shivers into his scarf and watches his breath puff out like a tiny cloud.',
-        Icons.ac_unit,
-      );
-    }
-    if (rainCodes.contains(code) &&
-        !const [95, 96, 99].contains(code) &&
-        precipitationMm >= 5) {
-      return (
-        'Puddle patrol',
-        'The sky brought the big watering can. He is negotiating for taller boots.',
-        Icons.umbrella,
-      );
-    }
-    if (const [51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82]
-        .contains(code)) {
-      return (
-        'Puddle patrol',
-        'He marches through the puddles, making two proud little splashes each step.',
-        Icons.umbrella,
-      );
-    }
-    if (const [3, 45, 48].contains(code)) {
-      return (
-        'Lantern detective',
-        'He follows the lantern glow through the fog, looking for the path under his boots.',
-        Icons.lightbulb_outline,
-      );
-    }
-    if (windKmh >= strongWindThresholdKmh) {
-      return (
-        'Hat patrol',
-        'He leans into the gusts while his scarf streams behind him like a tiny flag.',
-        Icons.air,
-      );
-    }
-    if (temperatureC >= strongHeatThresholdC) {
-      return (
-        'Portable shade',
-        'He wipes his brow as heat shimmer ripples above the ground around his boots.',
-        Icons.wb_sunny_outlined,
-      );
-    }
-    if (temperatureC <= 12) {
-      return (
-        'Pocket hand warmer',
-        'He shivers into his scarf, mittens on, with a little puff of frosty breath.',
-        Icons.ac_unit,
-      );
-    }
-    if (seasonalFoliage && season == WorldSeason.spring) {
-      return (
-        'Petal delivery',
-        'A blossom lands on his hood. He checks it for a tiny return address.',
-        Icons.local_florist_outlined,
-      );
-    }
-    if (seasonalFoliage && season == WorldSeason.autumn) {
-      return (
-        'Leaf disguise',
-        'An autumn leaf sticks to his hood. He walks like this was the plan.',
-        Icons.eco_outlined,
-      );
-    }
-    return (
-      'Forecast scout',
-      'He checks the sky, checks the forecast, then asks the goblin beside him.',
-      Icons.explore_outlined,
-    );
-  }
+  
 
   String _sceneName(
     int code,
@@ -2348,6 +2257,7 @@ class _WeatherHomeState extends State<WeatherHome>
       _lon = place.longitude;
       _tab = 0;
       _weather = null;
+      _loading = true;
       _lastUpdated = null;
       _usingCachedWeather = false;
       _sceneWeatherPreviousKey = '';

@@ -80,13 +80,15 @@ void main() {
 
   group('wind parallax offset', () {
     test('a still scene has no layer offset', () {
-      expect(_scene(windKmh: 0, windDirectionDeg: 180)
-          .debugParallaxMidOffset(W), 0);
+      expect(
+          _scene(windKmh: 0, windDirectionDeg: 180)
+              .debugParallaxMidOffset(W.toDouble()),
+          0);
     });
 
     test('the offset grows with wind speed', () {
       double offset(double wind) => _scene(windKmh: wind, windDirectionDeg: 180)
-          .debugParallaxMidOffset(W)
+          .debugParallaxMidOffset(W.toDouble())
           .abs();
 
       expect(offset(35), greaterThan(0));
@@ -96,20 +98,20 @@ void main() {
 
     test('the offset saturates instead of growing without bound', () {
       // A scene blown past the clamp must not slide off the canvas.
-      final extreme =
-          _scene(windKmh: 400, windDirectionDeg: 180).debugParallaxMidOffset(W);
-      final atMax =
-          _scene(windKmh: 160, windDirectionDeg: 180).debugParallaxMidOffset(W);
+      final extreme = _scene(windKmh: 400, windDirectionDeg: 180)
+          .debugParallaxMidOffset(W.toDouble());
+      final atMax = _scene(windKmh: 160, windDirectionDeg: 180)
+          .debugParallaxMidOffset(W.toDouble());
 
       expect(extreme, atMax);
       expect(extreme.abs(), lessThan(W * .05));
     });
 
     test('opposite bearings offset in opposite directions', () {
-      final eastward =
-          _scene(windKmh: 70, windDirectionDeg: 180).debugParallaxMidOffset(W);
-      final westward =
-          _scene(windKmh: 70, windDirectionDeg: 0).debugParallaxMidOffset(W);
+      final eastward = _scene(windKmh: 70, windDirectionDeg: 180)
+          .debugParallaxMidOffset(W.toDouble());
+      final westward = _scene(windKmh: 70, windDirectionDeg: 0)
+          .debugParallaxMidOffset(W.toDouble());
 
       expect(eastward, greaterThan(0));
       expect(westward, lessThan(0));
@@ -121,7 +123,7 @@ void main() {
       // zero; the layer must still lean rather than freeze.
       for (final bearing in [90.0, 270.0]) {
         final offset = _scene(windKmh: 70, windDirectionDeg: bearing)
-            .debugParallaxMidOffset(W);
+            .debugParallaxMidOffset(W.toDouble());
         expect(offset.abs(), greaterThan(0),
             reason: 'bearing $bearing produced no offset');
       }
@@ -129,14 +131,14 @@ void main() {
 
     test('reduced motion damps the offset', () {
       final full = _scene(windKmh: 140, windDirectionDeg: 180)
-          .debugParallaxMidOffset(W)
+          .debugParallaxMidOffset(W.toDouble())
           .abs();
       final damped = _scene(
         windKmh: 140,
         windDirectionDeg: 180,
         reduceMotion: true,
         reduceFlashing: true,
-      ).debugParallaxMidOffset(W).abs();
+      ).debugParallaxMidOffset(W.toDouble()).abs();
 
       expect(damped, greaterThan(0));
       expect(damped, lessThan(full));

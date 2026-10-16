@@ -10,6 +10,7 @@ import 'world_catalog.dart';
 import 'weather_rules.dart';
 import 'character_behavior.dart';
 import 'goblin_sprites.dart';
+import 'goblin_scenarios.dart';
 
 ui.Color weatherSceneSkyColor({
   required bool isDay,
@@ -160,6 +161,7 @@ class WeatherSceneConfig {
     this.environment = SceneEnvironment.live,
     this.reduceFlashing = false,
     this.reduceMotion = false,
+    this.scenario,
   });
 
   final int weatherCode;
@@ -182,6 +184,7 @@ class WeatherSceneConfig {
   final SceneEnvironment environment;
   final bool reduceFlashing;
   final bool reduceMotion;
+  final GoblinScenario? scenario;
 }
 
 /// Holds one Flame game across ordinary Flutter rebuilds so character actions
@@ -249,6 +252,7 @@ class WeatherSceneGame extends FlameGame with TapCallbacks, LongPressCallbacks {
   WorldLocation get location => config.location;
   SceneEnvironment get environment => config.environment;
   bool get reduceFlashing => config.reduceFlashing;
+  GoblinScenario? get scenario => config.scenario;
 
   late WeatherConditions _conditions = WeatherConditions(
     code: weatherCode,

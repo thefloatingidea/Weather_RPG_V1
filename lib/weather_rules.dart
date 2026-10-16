@@ -1,10 +1,82 @@
+import 'package:flutter/foundation.dart';
+
 /// Shared interpretation of normalized weather codes and measurements.
+///
 /// Thresholds describe artwork intensity; they are not hazard advisories.
 const strongHeatThresholdC = 35.0;
 const extremeHeatThresholdC = 40.0;
 const windyThresholdKmh = 35.0;
 const strongWindThresholdKmh = 45.0;
 const galeWindThresholdKmh = 70.0;
+
+/// Normalized weather categories for gameplay and rendering decisions.
+enum WeatherCategory { clear, cloudy, rain, snow, thunder, fog, unknown }
+
+/// Maps a raw WeatherAPI.com condition code to a [WeatherCategory].
+///
+/// Unknown codes are logged in debug mode and mapped to
+/// [WeatherCategory.unknown] — never to [WeatherCategory.clear], which would
+/// misreport a blizzard as sunshine.
+WeatherCategory categoryForCode(int code) {
+  if (_codeToCategory.containsKey(code)) {
+    return _codeToCategory[code]!;
+  }
+  if (kDebugMode) {
+    debugPrint('WeatherRules: unmapped WeatherAPI condition code $code');
+  }
+  return WeatherCategory.unknown;
+}
+
+const Map<int, WeatherCategory> _codeToCategory = {
+  1000: WeatherCategory.clear,
+  1003: WeatherCategory.cloudy,
+  1006: WeatherCategory.cloudy,
+  1009: WeatherCategory.cloudy,
+  1030: WeatherCategory.fog,
+  1063: WeatherCategory.rain,
+  1066: WeatherCategory.snow,
+  1069: WeatherCategory.snow,
+  1072: WeatherCategory.rain,
+  1087: WeatherCategory.thunder,
+  1114: WeatherCategory.snow,
+  1117: WeatherCategory.snow,
+  1135: WeatherCategory.fog,
+  1147: WeatherCategory.fog,
+  1150: WeatherCategory.rain,
+  1153: WeatherCategory.rain,
+  1168: WeatherCategory.rain,
+  1171: WeatherCategory.rain,
+  1180: WeatherCategory.rain,
+  1183: WeatherCategory.rain,
+  1186: WeatherCategory.rain,
+  1189: WeatherCategory.rain,
+  1192: WeatherCategory.rain,
+  1195: WeatherCategory.rain,
+  1198: WeatherCategory.rain,
+  1201: WeatherCategory.rain,
+  1204: WeatherCategory.snow,
+  1207: WeatherCategory.snow,
+  1210: WeatherCategory.snow,
+  1213: WeatherCategory.snow,
+  1216: WeatherCategory.snow,
+  1219: WeatherCategory.snow,
+  1222: WeatherCategory.snow,
+  1225: WeatherCategory.snow,
+  1237: WeatherCategory.snow,
+  1240: WeatherCategory.rain,
+  1243: WeatherCategory.rain,
+  1246: WeatherCategory.rain,
+  1249: WeatherCategory.snow,
+  1252: WeatherCategory.snow,
+  1255: WeatherCategory.snow,
+  1258: WeatherCategory.snow,
+  1261: WeatherCategory.snow,
+  1264: WeatherCategory.snow,
+  1273: WeatherCategory.thunder,
+  1276: WeatherCategory.thunder,
+  1279: WeatherCategory.snow,
+  1282: WeatherCategory.snow,
+};
 
 class WeatherConditions {
   const WeatherConditions({
@@ -23,25 +95,15 @@ class WeatherConditions {
   final double? cloudCover;
   final double? visibilityM;
 
-  static const rainCodes = <int>{
-    51,
-    53,
-    55,
-    56,
-    57,
-    61,
-    63,
-    65,
-    66,
-    67,
-    80,
-    81,
-    82,
+  static const rainCodes = {
+    51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82,
   };
-  static const snowCodes = <int>{71, 73, 75, 77, 85, 86};
-  static const thunderCodes = <int>{95, 96, 99};
-  static const dustCodes = <int>{30, 31, 32, 33, 34, 35};
-  static const fogCodes = <int>{45, 48};
+  static const snowCodes = {71, 73, 75, 77, 85, 86};
+  static const thunderCodes = {95, 96, 99};
+  static const dustCodes = {30, 31, 32, 33, 34, 35};
+  static const fogCodes = {45, 48};
+
+  WeatherCategory get category => categoryForCode(code);
 
   bool get raining => rainCodes.contains(code);
   bool get drizzle => const {51, 53, 55, 56, 57}.contains(code);
@@ -63,6 +125,7 @@ class WeatherConditions {
       (cloudCover ?? _cloudFallback).clamp(0.0, 100.0).toDouble();
   bool get overcast => code == 3 || cloudPercent >= 82;
   bool get partlyCloudy => code == 2 || cloudPercent >= 35 && cloudPercent < 82;
+
   double get rainIntensity {
     if (!raining) return 0;
     final amount = precipitationMm <= 0 ? .25 : precipitationMm / 5;
@@ -115,6 +178,7 @@ SceneEnvironment resolveSceneEnvironment({
   double? latitude,
 }) {
   final latitudeValue = latitude ?? 0;
+
   if (conditions.windKmh >= cycloneWindKmh &&
       conditions.windKmh >= windyThresholdKmh &&
       (conditions.thunderstorm || conditions.raining)) {
@@ -137,7 +201,9 @@ SceneEnvironment resolveSceneEnvironment({
     return SceneEnvironment.sandstorm;
   }
 
-  if (aridRegion && isDay && conditions.temperatureC >= extremeHeatThresholdC) {
+  if (aridRegion &&
+      isDay &&
+      conditions.temperatureC >= extremeHeatThresholdC) {
     return SceneEnvironment.desertHeat;
   }
 
@@ -145,8 +211,7 @@ SceneEnvironment resolveSceneEnvironment({
 }
 
 /// Short label for the HUD, describing the scene actually being shown.
-String sceneEnvironmentLabel(SceneEnvironment environment) =>
-    switch (environment) {
+String sceneEnvironmentLabel(SceneEnvironment environment) => switch (environment) {
       SceneEnvironment.cyclone => 'CYCLONE APPROACH',
       SceneEnvironment.flood => 'FLOODWATER',
       SceneEnvironment.desertHeat => 'DESERT HEAT',
