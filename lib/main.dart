@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'weather_scene.dart';
+import 'goblin_sprites.dart';
 import 'weather_models.dart';
 import 'world_catalog.dart';
 import 'weather_rules.dart';
@@ -336,6 +337,56 @@ class _WeatherMenuPalette {
   }
 }
 
+/// Owns the nickname text controller, so it is disposed with the widget rather
+/// than when `showDialog` resolves. Disposing earlier leaves the closing
+/// TextField holding a disposed controller during the route's exit animation.
+class _NicknameDialog extends StatefulWidget {
+  const _NicknameDialog({required this.city, this.initial});
+
+  final String city;
+  final String? initial;
+
+  @override
+  State<_NicknameDialog> createState() => _NicknameDialogState();
+}
+
+class _NicknameDialogState extends State<_NicknameDialog> {
+  late final TextEditingController _controller =
+      TextEditingController(text: widget.initial ?? '');
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    void close([String? value]) => Navigator.of(context).pop(value);
+
+    return AlertDialog(
+      title: Text('Nickname for ${widget.city}'),
+      content: TextField(
+        controller: _controller,
+        autofocus: true,
+        textCapitalization: TextCapitalization.words,
+        decoration: const InputDecoration(
+          hintText: 'e.g. Home, Office',
+          labelText: 'Nickname',
+        ),
+        onSubmitted: close,
+      ),
+      actions: [
+        TextButton(onPressed: () => close(), child: const Text('Cancel')),
+        TextButton(onPressed: () => close(''), child: const Text('Clear')),
+        FilledButton(
+          onPressed: () => close(_controller.text),
+          child: const Text('Save'),
+        ),
+      ],
+    );
+  }
+}
 class WeatherRpgApp extends StatefulWidget {
   const WeatherRpgApp({super.key});
 
@@ -443,7 +494,15 @@ class _WeatherHomeState extends State<WeatherHome>
   String _unit = '°C';
   bool _fahrenheit = false;
   bool _reduceFlashing = false;
-  final Set<String> _savedCities = {'Mumbai|Maharashtra, India'};
+  bool _extremeScenarios = true;
+  final List<SavedPlace> _savedPlaces = [
+    const SavedPlace(
+      city: 'Mumbai',
+      region: 'Maharashtra, India',
+      latitude: 19.0760,
+      longitude: 72.8777,
+    ),
+  ];
   final SharedPreferencesAsync _prefs = SharedPreferencesAsync();
   final WeatherApiClient _weatherApi =
       const WeatherApiClient(apiKey: weatherApiKey);
@@ -479,12 +538,16 @@ class _WeatherHomeState extends State<WeatherHome>
   }
 
   Future<void> _initializeApp() async {
+    // Warm the character sprite cache up front so the first scene renders with
+    // the sprite character instead of briefly falling back to the procedural one.
+    unawaited(GoblinSprites.warmCache());
     try {
       final values = await Future.wait<Object?>([
         _prefs.getString('selected_place'),
         _prefs.getStringList('saved_cities'),
         _prefs.getBool('fahrenheit'),
         _prefs.getBool('reduce_flashing'),
+        _prefs.getBool('extreme_scenarios'),
         _prefs.getString(_weatherCacheKey),
         _prefs.getString('character_profile_v1'),
       ]);
@@ -493,6 +556,7 @@ class _WeatherHomeState extends State<WeatherHome>
       final savedCities = values[1] as List<String>?;
       final fahrenheit = values[2] as bool?;
       final reduceFlashing = values[3] as bool?;
+      final extremeScenarios = values[4] as bool?;
       if (selectedPlace != null) {
         final place = jsonDecode(selectedPlace) as Map<String, dynamic>;
         _city = place['city'] as String? ?? _city;
@@ -501,18 +565,28 @@ class _WeatherHomeState extends State<WeatherHome>
         _lon = (place['longitude'] as num?)?.toDouble() ?? _lon;
       }
       if (savedCities != null && savedCities.isNotEmpty) {
-        _savedCities
-          ..clear()
-          ..addAll(savedCities);
+        final restored = <SavedPlace>[];
+        for (final entry in savedCities) {
+          final place = SavedPlace.parse(entry);
+          if (place != null && !restored.any((p) => p.samePlace(place))) {
+            restored.add(place);
+          }
+        }
+        if (restored.isNotEmpty) {
+          _savedPlaces
+            ..clear()
+            ..addAll(restored);
+        }
       }
       if (fahrenheit != null) {
         _fahrenheit = fahrenheit;
         _unit = _fahrenheit ? '°F' : '°C';
       }
       if (reduceFlashing != null) _reduceFlashing = reduceFlashing;
+      if (extremeScenarios != null) _extremeScenarios = extremeScenarios;
 
-      final cacheJson = values[4] as String?;
-      final profileJson = values[5] as String?;
+      final cacheJson = values[5] as String?;
+      final profileJson = values[6] as String?;
       if (profileJson != null) {
         _characterProfile = CharacterProfile.fromJson(
             jsonDecode(profileJson) as Map<String, dynamic>);
@@ -546,9 +620,11 @@ class _WeatherHomeState extends State<WeatherHome>
               'latitude': _lat,
               'longitude': _lon,
             })),
-        _prefs.setStringList('saved_cities', _savedCities.toList()),
+        _prefs.setStringList(
+            'saved_cities', _savedPlaces.map((p) => p.toJsonString()).toList()),
         _prefs.setBool('fahrenheit', _fahrenheit),
         _prefs.setBool('reduce_flashing', _reduceFlashing),
+        _prefs.setBool('extreme_scenarios', _extremeScenarios),
       ]);
     } catch (_) {
       // Preferences remain usable in memory for the current session.
@@ -589,6 +665,39 @@ class _WeatherHomeState extends State<WeatherHome>
     } catch (_) {
       // Character memories remain available for this session.
     }
+  }
+
+  /// The set-piece scene the current reading calls for, or
+  /// [SceneEnvironment.live] when the user has switched extreme scenarios off.
+  ///
+  /// This is what makes the cyclone, flood, sandstorm and desert-heat scenes
+  /// reachable: they were previously only addressable by constructing a config
+  /// by hand, so nothing in the app ever showed them.
+  SceneEnvironment get _sceneEnvironment {
+    if (!_extremeScenarios) return SceneEnvironment.live;
+    final current = _weather?.current;
+    if (current == null) return SceneEnvironment.live;
+    // Rain accumulated today is a far better flood signal than one reading, and
+    // it is already in the normalized bundle as `rain_sum`.
+    final daily = _weather?.daily;
+    final rainSums = daily?['rain_sum'];
+    final dailyRain = rainSums is List && rainSums.isNotEmpty
+        ? (rainSums.first as num?)?.toDouble()
+        : null;
+    return resolveSceneEnvironment(
+      conditions: WeatherConditions(
+        code: (current['weather_code'] as num?)?.toInt() ?? 0,
+        temperatureC: (current['temperature_2m'] as num?)?.toDouble() ?? 20,
+        precipitationMm: (current['precipitation'] as num?)?.toDouble() ?? 0,
+        windKmh: (current['wind_speed_10m'] as num?)?.toDouble() ?? 0,
+        cloudCover: (current['cloud_cover'] as num?)?.toDouble(),
+        visibilityM: (current['visibility'] as num?)?.toDouble(),
+      ),
+      aridRegion: _worldLocation.isArid,
+      isDay: (current['is_day'] as num?)?.toInt() == 1,
+      dailyPrecipitationMm: dailyRain,
+      latitude: _lat,
+    );
   }
 
   String _weatherMemoryKey(WeatherBundle? weather) {
@@ -743,10 +852,11 @@ class _WeatherHomeState extends State<WeatherHome>
       final lat = position.latitude;
       final lon = position.longitude;
       const city = 'My Location';
-      final region = '${lat.toStringAsFixed(3)}, ${lon.toStringAsFixed(3)}';
       setState(() {
         _city = city;
-        _region = region;
+        // Coordinates live in their own fields now; the region no longer has to
+        // double as a coordinate string.
+        _region = city;
         _lat = lat;
         _lon = lon;
         _tab = 0;
@@ -754,7 +864,12 @@ class _WeatherHomeState extends State<WeatherHome>
         _lastUpdated = null;
         _usingCachedWeather = false;
         _sceneWeatherPreviousKey = '';
-        _savedCities.add('$city|$region');
+        _rememberPlace(SavedPlace(
+          city: city,
+          region: city,
+          latitude: lat,
+          longitude: lon,
+        ));
       });
       await _savePreferences();
       await _fetchWeather();
@@ -815,10 +930,57 @@ class _WeatherHomeState extends State<WeatherHome>
       _lastUpdated = null;
       _usingCachedWeather = false;
       _sceneWeatherPreviousKey = '';
-      _savedCities.add('${result.city}|${result.region}');
+      _rememberPlace(SavedPlace(
+        city: result.city,
+        region: result.region,
+        latitude: result.latitude,
+        longitude: result.longitude,
+      ));
     });
     await _savePreferences();
     await _fetchWeather();
+  }
+
+  /// Adds a place to the saved list, preserving any nickname already given to
+  /// the same location and never storing duplicates.
+  void _rememberPlace(SavedPlace place) {
+    final index = _savedPlaces.indexWhere((p) => p.samePlace(place));
+    if (index >= 0) {
+      final existing = _savedPlaces[index];
+      if (existing.label != null && place.label == null) {
+        _savedPlaces[index] = place.copyWith(label: existing.label);
+      }
+      return;
+    }
+    _savedPlaces.add(place);
+  }
+
+  void _removePlace(SavedPlace place) {
+    setState(() {
+      _savedPlaces.removeWhere((p) => p.samePlace(place));
+    });
+    unawaited(_savePreferences());
+  }
+
+  /// Prompts for a nickname. Returns the new label, an empty string to clear it,
+  /// or null when the user cancels.
+  Future<String?> _promptForNickname(SavedPlace place) => showDialog<String>(
+        context: context,
+        builder: (_) => _NicknameDialog(city: place.city, initial: place.label),
+      );
+
+  Future<void> _renamePlace(SavedPlace place) async {
+    final label = await _promptForNickname(place);
+    if (!mounted || label == null) return;
+    final trimmed = label.trim();
+    setState(() {
+      final index = _savedPlaces.indexWhere((p) => p.samePlace(place));
+      if (index < 0) return;
+      _savedPlaces[index] = trimmed.isEmpty
+          ? _savedPlaces[index].copyWith(clearLabel: true)
+          : _savedPlaces[index].copyWith(label: trimmed);
+    });
+    unawaited(_savePreferences());
   }
 
   void _openSettings() {
@@ -871,6 +1033,19 @@ class _WeatherHomeState extends State<WeatherHome>
                 },
               ),
               const SizedBox(height: 12),
+              SwitchListTile.adaptive(
+                contentPadding: EdgeInsets.zero,
+                value: _extremeScenarios,
+                title: const Text('Extreme weather scenes'),
+                subtitle: const Text(
+                    'Switch to the cyclone, flood, sandstorm or desert-heat '
+                    'scene when the weather calls for it.'),
+                onChanged: (value) {
+                  setState(() => _extremeScenarios = value);
+                  unawaited(_savePreferences());
+                  setSheetState(() {});
+                },
+              ),
               SwitchListTile.adaptive(
                 contentPadding: EdgeInsets.zero,
                 value: _reduceFlashing,
@@ -926,7 +1101,7 @@ class _WeatherHomeState extends State<WeatherHome>
                 child: CustomPaint(
                   painter: _MenuParticlePainter(
                     animation: _weatherAnimation,
-                    environment: SceneEnvironment.live,
+                    environment: _sceneEnvironment,
                     aridRegion: _worldLocation.isArid,
                     seasonalFoliage: _worldLocation.seasonalFoliage,
                     latitude: _lat,
@@ -1006,7 +1181,7 @@ class _WeatherHomeState extends State<WeatherHome>
     final sceneDate = DateTime.tryParse(current?['time']?.toString() ?? '');
     return _WeatherMenuPalette.fromWeather(
       isDark: isDark,
-      environment: SceneEnvironment.live,
+      environment: _sceneEnvironment,
       weatherCode: (current?['weather_code'] as num?)?.toInt() ?? 0,
       temperatureC: (current?['temperature_2m'] as num?)?.toDouble() ?? 20,
       windSpeedKmh: (current?['wind_speed_10m'] as num?)?.toDouble() ?? 0,
@@ -1153,12 +1328,17 @@ class _WeatherHomeState extends State<WeatherHome>
     final feels = _temp(c['apparent_temperature']);
     final condition = weatherLabel(code);
     final rainProb = _currentRainProbability(w);
-    final environmentLabel = _sceneName(
-      code,
-      isDay,
-      summerClear: summerClear,
-      windKmh: windKmh,
-    );
+    // The HUD names the set-piece scene when one is active, so the label always
+    // describes what is actually on screen.
+    final environment = _sceneEnvironment;
+    final environmentLabel = environment == SceneEnvironment.live
+        ? _sceneName(
+            code,
+            isDay,
+            summerClear: summerClear,
+            windKmh: windKmh,
+          )
+        : sceneEnvironmentLabel(environment);
     return ListView(
       physics: const AlwaysScrollableScrollPhysics(),
       padding: const EdgeInsets.fromLTRB(14, 0, 14, 20),
@@ -1279,7 +1459,7 @@ class _WeatherHomeState extends State<WeatherHome>
                       previousWeatherKey: _sceneWeatherPreviousKey,
                       reduceMotion: reduceMotion,
                       location: _worldLocation,
-                      environment: SceneEnvironment.live,
+                      environment: _sceneEnvironment,
                       reduceFlashing: _reduceFlashing,
                     ),
                   ),
@@ -2148,9 +2328,56 @@ class _WeatherHomeState extends State<WeatherHome>
     );
   }
 
+  bool _isSelectedPlace(SavedPlace place) {
+    final sameName = place.city == _city;
+    if (place.latitude != 0 || place.longitude != 0) {
+      return sameName &&
+          (place.latitude - _lat).abs() < .01 &&
+          (place.longitude - _lon).abs() < .01;
+    }
+    return sameName && place.region == _region;
+  }
+
+  Future<void> _selectPlace(SavedPlace place) async {
+    if (_isSelectedPlace(place)) return;
+    final hasCoordinates = place.latitude != 0 || place.longitude != 0;
+    setState(() {
+      _city = place.city;
+      _region = place.region;
+      _lat = place.latitude;
+      _lon = place.longitude;
+      _tab = 0;
+      _weather = null;
+      _lastUpdated = null;
+      _usingCachedWeather = false;
+      _sceneWeatherPreviousKey = '';
+    });
+    await _savePreferences();
+    // A place saved before coordinates were stored has nothing usable to query,
+    // so resolve it through the geocoder once and keep the result.
+    if (!hasCoordinates) {
+      final result = await _geocode(
+          place.subtitle.isEmpty ? place.city : '${place.city}, ${place.region}');
+      if (!mounted || result == null) return;
+      setState(() {
+        _city = result.city;
+        _region = result.region;
+        _lat = result.latitude;
+        _lon = result.longitude;
+        _rememberPlace(SavedPlace(
+          city: result.city,
+          region: result.region,
+          latitude: result.latitude,
+          longitude: result.longitude,
+        ));
+      });
+      await _savePreferences();
+    }
+    await _fetchWeather();
+  }
+
   Widget _placesScreen(bool isDark) {
     final palette = _menuPalette(isDark);
-    final places = _savedCities.toList();
     return ListView(
       padding: const EdgeInsets.fromLTRB(14, 8, 14, 22),
       children: [
@@ -2174,80 +2401,68 @@ class _WeatherHomeState extends State<WeatherHome>
               Text(_gettingLocation ? 'FINDING LOCATION…' : 'USE MY LOCATION'),
         ),
         const SizedBox(height: 12),
-        ...places.map((key) {
-          final parts = key.split('|');
-          final selected =
-              parts.first == _city && (parts.length < 2 || parts[1] == _region);
-          return Padding(
-            padding: const EdgeInsets.only(bottom: 9),
-            child: InkWell(
-              onTap: () async {
-                if (selected) return;
-                final query = parts.length > 1
-                    ? '${parts.first}, ${parts[1]}'
-                    : parts.first;
-                final coords = parts.length > 1
-                    ? parts[1]
-                        .split(',')
-                        .map((value) => double.tryParse(value.trim()))
-                        .toList()
-                    : <double?>[];
-                final result = parts.first == 'My Location' &&
-                        coords.length == 2 &&
-                        coords.every((value) => value != null)
-                    ? PlaceResult(
-                        city: parts.first,
-                        region: parts[1],
-                        latitude: coords[0]!,
-                        longitude: coords[1]!,
-                      )
-                    : await _geocode(query);
-                if (result == null || !mounted) return;
-                setState(() {
-                  _city = result.city;
-                  _region = result.region;
-                  _lat = result.latitude;
-                  _lon = result.longitude;
-                  _tab = 0;
-                  _weather = null;
-                  _lastUpdated = null;
-                  _usingCachedWeather = false;
-                  _sceneWeatherPreviousKey = '';
-                });
-                await _savePreferences();
-                await _fetchWeather();
-              },
+        if (_savedPlaces.isEmpty)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 22),
+            child: Text(
+              'No saved places yet. Add one above to keep it here.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: palette.muted, fontSize: 12),
+            ),
+          )
+        else
+          ..._savedPlaces.map((place) {
+            final selected = _isSelectedPlace(place);
+            final subtitle = place.subtitle;
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 9),
               child: _pixelPanel(
                 isDark: isDark,
                 borderColor: selected ? palette.accent : palette.edge,
                 child: Row(
                   children: [
-                    Icon(Icons.location_on, color: palette.accent),
+                    Icon(
+                      selected ? Icons.my_location : Icons.location_on,
+                      color: palette.accent,
+                      size: 20,
+                    ),
                     const SizedBox(width: 10),
                     Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(parts.first.toUpperCase(),
-                              style:
-                                  const TextStyle(fontWeight: FontWeight.w900)),
-                          if (parts.length > 1)
-                            Text(parts[1],
-                                style: TextStyle(
-                                    color: palette.muted, fontSize: 11)),
-                        ],
+                      child: InkWell(
+                        onTap: () => _selectPlace(place),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(place.displayName.toUpperCase(),
+                                style: const TextStyle(
+                                    fontWeight: FontWeight.w900)),
+                            if (subtitle.isNotEmpty)
+                              Text(subtitle,
+                                  style: TextStyle(
+                                      color: palette.muted, fontSize: 11)),
+                          ],
+                        ),
                       ),
                     ),
-                    if (selected)
-                      Icon(Icons.check_circle, color: palette.accent)
-                    else
-                      Icon(Icons.chevron_right, color: palette.muted),
+                    IconButton(
+                      tooltip: 'Nickname',
+                      visualDensity: VisualDensity.compact,
+                      onPressed: () => _renamePlace(place),
+                      icon: Icon(Icons.edit_outlined,
+                          size: 19, color: palette.muted),
+                    ),
+                    IconButton(
+                      tooltip: 'Remove',
+                      visualDensity: VisualDensity.compact,
+                      onPressed: () => _removePlace(place),
+                      icon: Icon(Icons.delete_outline,
+                          size: 19, color: palette.muted),
+                    ),
                   ],
                 ),
               ),
-            ),
-          );
-        }),
+            );
+          }),
         const SizedBox(height: 12),
         Text(
           "Your places stay on this device. Location access is used only when you tap 'Use my location'.",
@@ -2260,26 +2475,142 @@ class _WeatherHomeState extends State<WeatherHome>
   Widget _journalScreen(bool isDark) {
     final palette = _menuPalette(isDark);
     final profile = _characterProfile;
+    final progress = profile.progress;
+    final collectedLandmarks = progress.landmarkIds.length;
+    final collectedWeather = progress.weatherKeys.length;
+
     return ListView(
       padding: const EdgeInsets.fromLTRB(14, 8, 14, 22),
       children: [
         _screenTitle('GOBLIN JOURNAL', 'A little weather, a lot of memories'),
         const SizedBox(height: 14),
+        if (!progress.hasAnyProgress) ...[
+          _pixelPanel(
+            isDark: isDark,
+            borderColor: palette.edge,
+            child: Text(
+              'The journal is empty. Visit a place and explore its weather to '
+              'start the goblin’s collection.',
+              style: TextStyle(color: palette.muted, fontSize: 12),
+            ),
+          ),
+          const SizedBox(height: 14),
+        ],
         _pixelPanel(
           isDark: isDark,
           borderColor: palette.accent,
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text('DISCOVERIES  ·  ${profile.discoveries.length}',
+              Text('COLLECTION',
+                  style: TextStyle(
+                      color: palette.highlight,
+                      fontWeight: FontWeight.w900,
+                      letterSpacing: .9)),
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  Expanded(
+                    child: _progressStat(
+                      palette: palette,
+                      label: 'LANDMARKS',
+                      collected: collectedLandmarks,
+                      total: landmarkCatalog.length,
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: _progressStat(
+                      palette: palette,
+                      label: 'WEATHER',
+                      collected: collectedWeather,
+                      total: weatherBadgeCatalog.length,
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: _progressStat(
+                      palette: palette,
+                      label: 'WORLDS',
+                      collected: progress.locationsVisited,
+                      total: worldLocations.length,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Text(
+                '${progress.totalVisits} total '
+                '${progress.totalVisits == 1 ? "visit" : "visits"}',
+                style: TextStyle(color: palette.muted, fontSize: 11),
+              ),
+              if (progress.favouriteLocationId != null)
+                Text(
+                  'Most revisited: ${_worldNameFor(progress.favouriteLocationId!)}',
+                  style: TextStyle(color: palette.muted, fontSize: 11),
+                ),
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: [
+                  for (final badge in weatherBadgeCatalog)
+                    _badgeChip(
+                      palette: palette,
+                      emoji: badge.emoji,
+                      label: badge.name,
+                      unlocked: progress.weatherKeys.contains(badge.key),
+                    ),
+                ],
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 14),
+        _pixelPanel(
+          isDark: isDark,
+          borderColor: palette.edge,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                  'LANDMARKS  ·  $collectedLandmarks/${landmarkCatalog.length}',
+                  style: TextStyle(
+                      color: palette.highlight,
+                      fontWeight: FontWeight.w900,
+                      letterSpacing: .8)),
+              const SizedBox(height: 10),
+              Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: [
+                  for (final entry in landmarkCatalog)
+                    _landmarkTile(
+                      palette: palette,
+                      emoji: entry.emoji,
+                      name: entry.name,
+                      visited: progress.landmarkIds.contains(entry.landmark.name),
+                    ),
+                ],
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 14),
+        _pixelPanel(
+          isDark: isDark,
+          borderColor: palette.edge,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('RECENT MEMORIES  ·  ${profile.recentEvents.length}',
                   style: TextStyle(
                       color: palette.highlight,
                       fontWeight: FontWeight.w900,
                       letterSpacing: .8)),
               const SizedBox(height: 8),
-              if (profile.discoveries.isEmpty)
-                Text(
-                    'Visit a place and explore its weather to start the journal.',
+              if (profile.recentEvents.isEmpty)
+                Text('Nothing remembered yet.',
                     style: TextStyle(color: palette.muted, fontSize: 12)),
               ...profile.recentEvents.take(24).map((event) => Padding(
                     padding: const EdgeInsets.only(bottom: 9),
@@ -2312,6 +2643,125 @@ class _WeatherHomeState extends State<WeatherHome>
           ),
         ),
       ],
+    );
+  }
+
+  String _worldNameFor(String locationId) {
+    for (final location in worldLocations) {
+      if (location.id == locationId) return location.name;
+    }
+    // Regional fallbacks use ids like `regional-desert`.
+    final words = locationId.replaceAll('-', ' ');
+    if (words.isEmpty) return locationId;
+    return '${words[0].toUpperCase()}${words.substring(1)}';
+  }
+
+  Widget _progressStat({
+    required _WeatherMenuPalette palette,
+    required String label,
+    required int collected,
+    required int total,
+  }) {
+    final complete = total > 0 && collected >= total;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('$collected/$total',
+            style: TextStyle(
+                color: complete ? palette.accent : palette.highlight,
+                fontSize: 17,
+                fontWeight: FontWeight.w900)),
+        Text(label,
+            style: TextStyle(
+                color: palette.muted, fontSize: 9, letterSpacing: .8)),
+        const SizedBox(height: 4),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(3),
+          child: LinearProgressIndicator(
+            value: total == 0 ? 0 : (collected / total).clamp(0.0, 1.0),
+            minHeight: 5,
+            backgroundColor: palette.edge.withValues(alpha: .35),
+            valueColor: AlwaysStoppedAnimation<Color>(
+                complete ? palette.accent : palette.highlight),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _landmarkTile({
+    required _WeatherMenuPalette palette,
+    required String emoji,
+    required String name,
+    required bool visited,
+  }) {
+    return Container(
+      width: 96,
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+      decoration: BoxDecoration(
+        color: visited
+            ? palette.surfaceAlt
+            : palette.surface.withValues(alpha: .45),
+        border: Border.all(
+          color: visited ? palette.accent : palette.edge.withValues(alpha: .5),
+          width: 1.2,
+        ),
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: Column(
+        children: [
+          Text(visited ? emoji : '🔒', style: const TextStyle(fontSize: 17)),
+          const SizedBox(height: 3),
+          Text(
+            visited ? name : '???',
+            textAlign: TextAlign.center,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              color: visited ? palette.text : palette.muted,
+              fontSize: 9,
+              height: 1.15,
+              fontWeight: visited ? FontWeight.w700 : FontWeight.w400,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _badgeChip({
+    required _WeatherMenuPalette palette,
+    required String emoji,
+    required String label,
+    required bool unlocked,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+      decoration: BoxDecoration(
+        color: unlocked
+            ? palette.surfaceAlt
+            : palette.surface.withValues(alpha: .40),
+        border: Border.all(
+          color: unlocked ? palette.accent : palette.edge.withValues(alpha: .5),
+          width: 1.1,
+        ),
+        borderRadius: BorderRadius.circular(11),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(unlocked ? emoji : '🔒', style: const TextStyle(fontSize: 12)),
+          const SizedBox(width: 5),
+          Text(
+            unlocked ? label : 'Locked',
+            style: TextStyle(
+              color: unlocked ? palette.text : palette.muted,
+              fontSize: 10,
+              fontWeight: unlocked ? FontWeight.w700 : FontWeight.w400,
+            ),
+          ),
+        ],
+      ),
     );
   }
 

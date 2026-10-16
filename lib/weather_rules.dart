@@ -82,3 +82,74 @@ class WeatherConditions {
         _ => 64,
       };
 }
+
+/// Which hand-built scene the live weather should be rendered as.
+///
+/// [live] is the normal layered scene. The other four select dedicated
+/// set-piece environments that would otherwise never be reachable, because a
+/// single weather reading rarely lands on them by chance.
+///
+/// Thresholds describe artwork intensity only; they are not hazard advisories
+/// and must not be presented to users as warnings.
+enum SceneEnvironment { live, cyclone, flood, desertHeat, sandstorm }
+
+/// Wind at which a tropical storm scene is warranted, in km/h.
+const cycloneWindKmh = 118.0;
+
+/// Rainfall for the day at which the flood scene is warranted, in mm.
+const floodDailyRainMm = 60.0;
+
+/// Rainfall in one reading that alone warrants the flood scene, in mm.
+const floodInstantRainMm = 20.0;
+
+/// Resolves the scene for a live reading, or [SceneEnvironment.live] when no
+/// set-piece matches.
+///
+/// Precedence runs most severe first: a cyclone is also a flood and a gale, so
+/// it must win before the lower-energy scenes get a chance to claim it.
+SceneEnvironment resolveSceneEnvironment({
+  required WeatherConditions conditions,
+  required bool aridRegion,
+  required bool isDay,
+  double? dailyPrecipitationMm,
+  double? latitude,
+}) {
+  final latitudeValue = latitude ?? 0;
+  if (conditions.windKmh >= cycloneWindKmh &&
+      conditions.windKmh >= windyThresholdKmh &&
+      (conditions.thunderstorm || conditions.raining)) {
+    // Cyclones do not form within about 5 degrees of the equator.
+    if (latitudeValue.abs() >= 5) return SceneEnvironment.cyclone;
+  }
+
+  final dailyRain = dailyPrecipitationMm ?? 0;
+  if (conditions.raining &&
+      (dailyRain >= floodDailyRainMm ||
+          conditions.precipitationMm >= floodInstantRainMm)) {
+    return SceneEnvironment.flood;
+  }
+
+  if (aridRegion &&
+      (conditions.dusty ||
+          (conditions.windKmh >= galeWindThresholdKmh &&
+              conditions.precipitationMm <= 0 &&
+              !conditions.raining))) {
+    return SceneEnvironment.sandstorm;
+  }
+
+  if (aridRegion && isDay && conditions.temperatureC >= extremeHeatThresholdC) {
+    return SceneEnvironment.desertHeat;
+  }
+
+  return SceneEnvironment.live;
+}
+
+/// Short label for the HUD, describing the scene actually being shown.
+String sceneEnvironmentLabel(SceneEnvironment environment) =>
+    switch (environment) {
+      SceneEnvironment.cyclone => 'CYCLONE APPROACH',
+      SceneEnvironment.flood => 'FLOODWATER',
+      SceneEnvironment.desertHeat => 'DESERT HEAT',
+      SceneEnvironment.sandstorm => 'SANDSTORM',
+      SceneEnvironment.live => '',
+    };

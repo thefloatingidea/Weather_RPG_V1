@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 enum WorldBiome {
   tropical,
   coastal,
@@ -333,6 +335,191 @@ const worldLocations = <WorldLocation>[
       biome: WorldBiome.tropical,
       landmark: WorldLandmark.singaporeSkyline),
 ];
+
+/// A location the user has saved to their Places list.
+///
+/// Replaces the earlier `'City|Region'` string key, which conflated a region
+/// name with a coordinate pair: entries created from device location stored
+/// `"19.076, 72.878"` in the region field, so any consumer that expected a
+/// place name got coordinates instead.
+class SavedPlace {
+  const SavedPlace({
+    required this.city,
+    required this.region,
+    required this.latitude,
+    required this.longitude,
+    this.label,
+  });
+
+  final String city;
+  final String region;
+  final double latitude;
+  final double longitude;
+
+  /// Optional user-supplied nickname. The underlying place is unchanged, so
+  /// forecasts and the world catalogue still resolve normally.
+  final String? label;
+
+  /// Stable identity for de-duplication. Coordinates are rounded so that a
+  /// repeated search for the same city does not create a second entry.
+  String get id => '${normalizePlaceName(city)}|'
+      '${latitude.toStringAsFixed(3)},${longitude.toStringAsFixed(3)}';
+
+  /// Name shown in the UI: the nickname when set, otherwise the city.
+  String get displayName => (label != null && label!.trim().isNotEmpty)
+      ? label!.trim()
+      : city;
+
+  bool get hasLabel => label != null && label!.trim().isNotEmpty;
+
+  /// Secondary line. Falls back to the city when [displayName] is a nickname, so
+  /// the nickname and the place name are both visible without repeating either.
+  String get subtitle {
+    if (hasLabel) return city;
+    if (region == city || region.trim().isEmpty) return '';
+    return region;
+  }
+
+  SavedPlace copyWith({String? label, bool clearLabel = false}) => SavedPlace(
+        city: city,
+        region: region,
+        latitude: latitude,
+        longitude: longitude,
+        label: clearLabel ? null : (label ?? this.label),
+      );
+
+  Map<String, Object?> toJson() => {
+        'city': city,
+        'region': region,
+        'latitude': latitude,
+        'longitude': longitude,
+        if (label != null) 'label': label,
+      };
+
+  String toJsonString() => jsonEncode(toJson());
+
+  static SavedPlace fromJson(Map<String, dynamic> json) => SavedPlace(
+        city: json['city'] as String? ?? '',
+        region: json['region'] as String? ?? '',
+        latitude: (json['latitude'] as num?)?.toDouble() ?? 0,
+        longitude: (json['longitude'] as num?)?.toDouble() ?? 0,
+        label: json['label'] as String?,
+      );
+
+  /// Reads a stored entry, accepting the legacy `'City|Region'` string so an
+  /// existing Places list survives the upgrade.
+  ///
+  /// Legacy device-location entries carried `"lat, lon"` in the region field.
+  /// That text is kept as the region, preserving the display the user already
+  /// had, while the same numbers are also promoted into the coordinate fields.
+  static SavedPlace? parse(String stored) {
+    final trimmed = stored.trim();
+    if (trimmed.startsWith('{')) {
+      try {
+        final decoded = jsonDecode(trimmed);
+        if (decoded is Map<String, dynamic>) return fromJson(decoded);
+      } catch (_) {
+        return null;
+      }
+    }
+    final parts = trimmed.split('|');
+    if (parts.isEmpty || parts.first.isEmpty) return null;
+    final city = parts.first;
+    final region = parts.length > 1 ? parts[1] : '';
+    final coordinates = region
+        .split(',')
+        .map((value) => double.tryParse(value.trim()))
+        .toList();
+    final isCoordinates =
+        coordinates.length == 2 && coordinates.every((value) => value != null);
+    return SavedPlace(
+      city: city,
+      region: region,
+      latitude: isCoordinates ? coordinates[0]! : 0,
+      longitude: isCoordinates ? coordinates[1]! : 0,
+    );
+  }
+}
+
+/// Equality is identity-based so a saved list can be de-duplicated directly.
+extension SavedPlaceEquality on SavedPlace {
+  bool samePlace(SavedPlace other) => id == other.id;
+}
+
+/// A collectible landmark: the enum value plus how it is presented in the
+/// journal's collection grid.
+class LandmarkEntry {
+  const LandmarkEntry(this.landmark, this.name, this.emoji);
+
+  final WorldLandmark landmark;
+  final String name;
+  final String emoji;
+}
+
+/// Every catalogued landmark, in a stable order, for collection progress.
+const landmarkCatalog = <LandmarkEntry>[
+  LandmarkEntry(WorldLandmark.tajMahal, 'Taj Mahal', '🕌'),
+  LandmarkEntry(WorldLandmark.hawaMahal, 'Hawa Mahal', '🏰'),
+  LandmarkEntry(WorldLandmark.indiaGate, 'India Gate', '🏛️'),
+  LandmarkEntry(WorldLandmark.gatewayOfIndia, 'Gateway of India', '⛩️'),
+  LandmarkEntry(WorldLandmark.howrahBridge, 'Howrah Bridge', '🌉'),
+  LandmarkEntry(WorldLandmark.varanasiGhats, 'Varanasi Ghats', '🪔'),
+  LandmarkEntry(WorldLandmark.goldenTemple, 'Golden Temple', '🛕'),
+  LandmarkEntry(WorldLandmark.charminar, 'Charminar', '🕌'),
+  LandmarkEntry(WorldLandmark.chennaiLighthouse, 'Chennai Lighthouse', '🗼'),
+  LandmarkEntry(WorldLandmark.bengaluruPalace, 'Bengaluru Palace', '🏯'),
+  LandmarkEntry(WorldLandmark.kochiFishingNets, 'Kochi Fishing Nets', '🎣'),
+  LandmarkEntry(WorldLandmark.srinagarLake, 'Dal Lake', '🛶'),
+  LandmarkEntry(WorldLandmark.shimlaHills, 'Shimla Hills', '⛰️'),
+  LandmarkEntry(WorldLandmark.lehMonastery, 'Leh Monastery', '🏔️'),
+  LandmarkEntry(WorldLandmark.jaisalmerFort, 'Jaisalmer Fort', '🏜️'),
+  LandmarkEntry(WorldLandmark.rishikeshBridge, 'Rishikesh Bridge', '🌁'),
+  LandmarkEntry(WorldLandmark.bhopalLake, 'Bhopal Lake', '🌊'),
+  LandmarkEntry(WorldLandmark.eiffelTower, 'Eiffel Tower', '🗼'),
+  LandmarkEntry(WorldLandmark.bigBen, 'Big Ben', '🕰️'),
+  LandmarkEntry(WorldLandmark.newYorkSkyline, 'New York Skyline', '🌆'),
+  LandmarkEntry(WorldLandmark.tokyoFuji, 'Mount Fuji', '🗻'),
+  LandmarkEntry(WorldLandmark.colosseum, 'Colosseum', '🏟️'),
+  LandmarkEntry(WorldLandmark.cairoPyramids, 'Giza Pyramids', '🔺'),
+  LandmarkEntry(WorldLandmark.sydneyOperaHouse, 'Sydney Opera House', '🎭'),
+  LandmarkEntry(WorldLandmark.rioMountain, 'Sugarloaf Mountain', '⛰️'),
+  LandmarkEntry(WorldLandmark.dubaiTower, 'Burj Khalifa', '🌇'),
+  LandmarkEntry(WorldLandmark.singaporeSkyline, 'Singapore Skyline', '🏙️'),
+];
+
+/// A collectible weather memory, matching the keys `CharacterProfile`
+/// records in `weatherExperiences`.
+class WeatherBadge {
+  const WeatherBadge(this.key, this.name, this.emoji);
+
+  final String key;
+  final String name;
+  final String emoji;
+}
+
+const weatherBadgeCatalog = <WeatherBadge>[
+  WeatherBadge('rain', 'First rain', '🌧️'),
+  WeatherBadge('thunderstorm', 'First thunderstorm', '⛈️'),
+  WeatherBadge('snow', 'First snowfall', '❄️'),
+  WeatherBadge('season:spring', 'Spring world', '🌸'),
+  WeatherBadge('season:summer', 'Summer world', '☀️'),
+  WeatherBadge('season:autumn', 'Autumn world', '🍂'),
+  WeatherBadge('season:winter', 'Winter world', '🌨️'),
+];
+
+/// Human-readable landmark name for the given id, falling back to a tidied
+/// version of the id itself.
+String landmarkDisplayName(String landmarkId) {
+  for (final entry in landmarkCatalog) {
+    if (entry.landmark.name == landmarkId) return entry.name;
+  }
+  final words = landmarkId
+      .replaceAllMapped(
+          RegExp(r'([a-z])([A-Z])'), (match) => '${match[1]} ${match[2]}')
+      .replaceAll('_', ' ');
+  if (words.isEmpty) return landmarkId;
+  return '${words[0].toUpperCase()}${words.substring(1)}';
+}
 
 String normalizePlaceName(String value) =>
     value.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]+'), ' ').trim();

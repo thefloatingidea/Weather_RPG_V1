@@ -238,6 +238,87 @@ class ProfileUpdate {
   final List<CharacterJournalEvent> addedEvents;
 }
 
+/// What the profile has collected, so the journal can show progress rather than
+/// only a running list of events.
+class CharacterProgress {
+  const CharacterProgress({
+    required this.landmarkIds,
+    required this.weatherKeys,
+    required this.locationsVisited,
+    required this.totalVisits,
+    required this.visitCounts,
+    required this.discoveryCount,
+  });
+
+  /// Catalogued landmark ids the goblin has studied, e.g. `tajMahal`.
+  final Set<String> landmarkIds;
+
+  /// Keys into `weatherBadgeCatalog` that have been experienced.
+  final Set<String> weatherKeys;
+
+  /// How many distinct weather worlds have been entered.
+  final int locationsVisited;
+
+  /// Total recorded visits, including repeat visits.
+  final int totalVisits;
+
+  /// Visit count per location id, for a "most visited" line.
+  final Map<String, int> visitCounts;
+
+  /// Raw discovery count, which includes visits as well as landmarks.
+  final int discoveryCount;
+
+  bool get hasAnyProgress =>
+      landmarkIds.isNotEmpty || weatherKeys.isNotEmpty || locationsVisited > 0;
+
+  /// The location id visited most often, or null when nothing has been visited.
+  String? get favouriteLocationId {
+    if (visitCounts.isEmpty) return null;
+    final best = visitCounts.entries
+        .reduce((a, b) => b.value > a.value ? b : a);
+    return best.value > 1 ? best.key : null;
+  }
+
+  static const empty = CharacterProgress(
+    landmarkIds: {},
+    weatherKeys: {},
+    locationsVisited: 0,
+    totalVisits: 0,
+    visitCounts: {},
+    discoveryCount: 0,
+  );
+}
+
+extension CharacterProgressReader on CharacterProfile {
+  /// Derives the collection state from the profile's recorded sets.
+  ///
+  /// Landmarks live inside `discoveries` as `landmark:<locationId>:<landmarkId>`
+  /// entries, which is why this parsing exists rather than a dedicated field.
+  CharacterProgress get progress {
+    final landmarks = <String>{};
+    for (final discovery in discoveries) {
+      if (!discovery.startsWith('landmark:')) continue;
+      final parts = discovery.split(':');
+      if (parts.length >= 3 && parts[2].isNotEmpty) landmarks.add(parts[2]);
+    }
+    final weather = <String>{};
+    for (final experience in weatherExperiences) {
+      if (experience.startsWith('season:') || experience == 'rain' ||
+          experience == 'thunderstorm' || experience == 'snow') {
+        weather.add(experience);
+      }
+    }
+    return CharacterProgress(
+      landmarkIds: landmarks,
+      weatherKeys: weather,
+      locationsVisited: visitedLocations.length,
+      totalVisits: visitCounts.values.fold<int>(0, (sum, value) => sum + value),
+      visitCounts: visitCounts,
+      discoveryCount: discoveries.length,
+    );
+  }
+}
+
 class CharacterSceneContext {
   const CharacterSceneContext({
     required this.weatherKey,

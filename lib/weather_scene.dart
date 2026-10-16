@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
@@ -8,8 +9,7 @@ import 'package:flutter/widgets.dart';
 import 'world_catalog.dart';
 import 'weather_rules.dart';
 import 'character_behavior.dart';
-
-enum SceneEnvironment { live, cyclone, flood, desertHeat, sandstorm }
+import 'goblin_sprites.dart';
 
 ui.Color weatherSceneSkyColor({
   required bool isDay,
@@ -70,6 +70,25 @@ ui.Color weatherSceneGroundColor({
   if (winterSeason) return const ui.Color(0xFF625F59);
   if (rain || storm) return const ui.Color(0xFF263D48);
   return const ui.Color(0xFF315E4D);
+}
+
+enum _HorizonKind {
+  woodedRidge,
+  canopy,
+  dune,
+  mountain,
+  skyline,
+  coast,
+  riverPlain,
+}
+
+/// Layers a caller can suppress, so tests can measure one element in isolation.
+/// Only the debug entry point sets this; normal rendering uses [none].
+enum DebugSceneLayers {
+  none,
+  withoutLandmark,
+  withoutCharacter,
+  withoutLandmarkAndCharacter,
 }
 
 enum _AmbientKind { bird, butterfly, frog, firefly, owl, cricket }
@@ -180,6 +199,14 @@ class _WeatherSceneHostState extends State<WeatherSceneHost> {
   late final WeatherSceneGame _game = WeatherSceneGame(config: widget.config);
 
   @override
+  void initState() {
+    super.initState();
+    // Loading is idempotent and cheap after the first call, so this only guards
+    // against a host that mounted before the shared warm-up finished.
+    unawaited(_game.loadCharacterSprites());
+  }
+
+  @override
   void didUpdateWidget(covariant WeatherSceneHost oldWidget) {
     super.didUpdateWidget(oldWidget);
     _game.updateConfig(widget.config);
@@ -189,8 +216,9 @@ class _WeatherSceneHostState extends State<WeatherSceneHost> {
   Widget build(BuildContext context) => GameWidget(game: _game);
 }
 
-/// Fully procedural pixel-art weather world. No character or background image
-/// assets are required: every scene and the reactive goblin are drawn in Flame.
+/// Pixel-art weather world. The environment is drawn procedurally in Flame; the
+/// character uses the PNG sprite frames in `assets/images/goblin_frames`, with
+/// the procedural goblin retained as a fallback if those frames cannot load.
 class WeatherSceneGame extends FlameGame with TapCallbacks, LongPressCallbacks {
   WeatherSceneGame({required this.config})
       : _ambientRandom = math.Random(config.location.id.codeUnits
@@ -275,6 +303,52 @@ class WeatherSceneGame extends FlameGame with TapCallbacks, LongPressCallbacks {
   );
   int _lastBehaviorRevision = -1;
   bool _longPressHandled = false;
+
+  /// Goblin sprite frames, or null while the assets are still loading (or if
+  /// loading failed). A null source falls back to the procedural goblin, so the
+  /// scene is always renderable.
+  GoblinSprites? _sprites;
+  bool _spritesRequested = false;
+
+  /// Loads the character sprite frames. Call once before mounting the game;
+  /// repeated calls are cheap because [GoblinSprites.warmCache] reuses the
+  /// shared image cache. Failures leave [_sprites] null, which falls back to
+  /// the procedural character rather than throwing into the render loop.
+  Future<void> loadCharacterSprites() async {
+    if (_spritesRequested) return;
+    _spritesRequested = true;
+    try {
+      await GoblinSprites.warmCache();
+      _sprites = GoblinSprites.fromCache();
+    } catch (error, stack) {
+      _spritesRequested = false;
+      FlutterError.reportError(FlutterErrorDetails(
+        exception: error,
+        stack: stack,
+        library: 'weather_scene',
+        context: ErrorDescription('loading goblin sprite frames'),
+      ));
+    }
+  }
+
+  /// True once the sprite frames are available and the character renders from
+  /// them rather than from the procedural fallback.
+  bool get usesSpriteCharacter => _sprites != null && !_sprites!.isEmpty;
+
+  /// Test seam: installs already-decoded sprite frames without going through the
+  /// asset bundle, which `flutter test` does not build.
+  @visibleForTesting
+  void debugSetSprites(GoblinSprites sprites) {
+    _spritesRequested = true;
+    _sprites = sprites;
+  }
+
+  /// Test seam: suppresses one drawn layer so a frame can be measured with the
+  /// landmark or the character removed. Leave at [DebugSceneLayers.none] in app
+  /// code.
+  @visibleForTesting
+  DebugSceneLayers debugHiddenLayers = DebugSceneLayers.none;
+
   CharacterSceneContext? _cachedBehaviorContext;
   int? _cachedBehaviorHour;
   final List<String> _recentDialogue = [];
@@ -337,40 +411,59 @@ class WeatherSceneGame extends FlameGame with TapCallbacks, LongPressCallbacks {
     return _routePhase < 4 || (_routePhase >= 7 && _routePhase < 11);
   }
 
-  bool get _walkingLeft => _live
-      ? _behavior.isWalking && _behavior.walkDirection < 0
-      : _desertHeat
-          ? false
-          : _sandstorm
-              ? math.sin(_elapsed * .35) < 0
-              : false;
+  /// The character's horizontal lane, as a fraction of scene width.
+  ///
+  /// Landmark footprints were measured to straddle the centre of every scene, so
+  /// a centred character always covered the landmark's most recognizable feature.
+  /// When a landmark is present the character keeps to the right-hand lane; with
+  /// no landmark it stays centred.
+  double get _characterLane =>
+      location.landmark == WorldLandmark.none ? .50 : .755;
+
+  /// Extent of the character's lateral walk, in scene-width fractions.
+  double get _characterLaneSpan =>
+      location.landmark == WorldLandmark.none ? .30 : .12;
+
+  /// Fore-and-aft sweep for the non-interactive route scenes, oscillating
+  /// smoothly between -1 and 1 with a reversal at each end.
+  double get _routeSweep =>
+      math.sin(math.pi * ((_routePhase / 14) % 1.0)).abs() * 2 - 1;
+
+  bool get _walkingLeft {
+    if (_live) {
+      return _behavior.isWalking && _behavior.walkDirection < 0;
+    }
+    if (_cyclone || _sandstorm || _desertHeat) {
+      // These scenes sweep laterally, so facing follows the current direction.
+      return math.cos(math.pi * ((_routePhase / 14) % 1.0)) < 0;
+    }
+    // Route scenes move right on the outbound leg and left on the return leg.
+    return _routePhase >= 7 && _routePhase < 11;
+  }
   double get _sceneX {
     if (_cyclone) {
       return .20 + .11 * (_wind / 160) + .02 * math.sin(_elapsed * 4);
     }
-    if (_flood) return .52;
-    if (_sandstorm) return .34 + .06 * math.sin(_elapsed * .35);
-    if (_desertHeat) return _elapsed < 4 ? .32 + .17 * (_elapsed / 4) : .49;
+    // The flood set-piece places the raft and alert sign in its own left-of-
+    // centre slot, so the character is matched to those rather than to the
+    // landmark lane (a flood scene draws no landmark).
+    if (_flood) return .40;
+    if (_sandstorm) {
+      return _characterLane + .06 * math.sin(_elapsed * .35);
+    }
+    if (_desertHeat) {
+      return _elapsed < 4
+          ? .32 + (_characterLane - .02 - .32) * (_elapsed / 4)
+          : _characterLane - .02;
+    }
+    final walkScale = reduceFlashing || reduceMotion ? .5 : 1.0;
     if (_live) {
-      final walkScale = reduceFlashing || reduceMotion ? .5 : 1.0;
-      return (.5 + _behavior.walkAmount * walkScale).clamp(.32, .68).toDouble();
+      final lane = _characterLane;
+      return (lane + _behavior.walkAmount * walkScale * (.05 / .055))
+          .clamp(lane - .05, lane + .05)
+          .toDouble();
     }
-    if (_rain && !_hot && !_winterWorld) {
-      return _routePhase < 4
-          ? .22 + .30 * (_routePhase / 4)
-          : _routePhase < 7
-              ? .52
-              : _routePhase < 11
-                  ? .52 - .30 * ((_routePhase - 7) / 4)
-                  : .22;
-    }
-    return _routePhase < 4
-        ? .18 + .34 * (_routePhase / 4)
-        : _routePhase < 7
-            ? .52
-            : _routePhase < 11
-                ? .52 - .34 * ((_routePhase - 7) / 4)
-                : .18;
+    return _characterLane + _routeSweep * _characterLaneSpan / 2;
   }
 
   double get _strideSpeed => _cyclone
@@ -445,7 +538,107 @@ class WeatherSceneGame extends FlameGame with TapCallbacks, LongPressCallbacks {
         winterSeason: _winterSeason,
       );
 
+  /// Night dimming wash, applied per element rather than over the whole scene.
+  static const ui.Color _nightWashColor = ui.Color(0xFF202C4D);
+
+  /// Dusk colour the late-afternoon landscape leans toward as the light fades,
+  /// softening the step between the day and night sky palettes.
+  static const ui.Color _duskSkyColor = ui.Color(0xFF6B5670);
+
+  /// Sky colour after the lighting model has had its say. Exposed for tests.
+  @visibleForTesting
+  ui.Color get debugLitSkyColor {
+    final base = _skyColor;
+    final fall = _nightAmount;
+    if (fall <= 0) return base;
+    return ui.Color.lerp(base, _duskSkyColor, (fall * .55).clamp(0.0, 1.0))!;
+  }
+
+  /// Night dimming strength for the current hour, 0 by day and 1 at night.
+  @visibleForTesting
+  double get debugNightAmount => _nightAmount;
+
+  /// Strength of the warm sunrise/sunset cast.
+  @visibleForTesting
+  double get debugGoldenAmount => _goldenAmount;
+
+  /// Where the sun sits between rise and set, or null when it is below the
+  /// horizon. Drives both the sun's screen position and the light direction.
+  @visibleForTesting
+  double? get debugSunProgress => _sunProgress;
+
+  /// Lateral offset of the mid-ground layer, in logical pixels, for a scene of
+  /// the given width. Distant layers share the far horizon's fixed frame; the
+  /// character's layer stays fixed too, so this is the layer that reads as
+  /// "nearer than the horizon, further than the character".
+  @visibleForTesting
+  double debugParallaxMidOffset(double width) => _parallaxMidOffset(width);
+  static const int _nightWashMaxAlpha = 0x33;
+
+  /// Fraction of the way from rise to set, 0..1, or null outside daylight.
+  double? get _sunProgress {
+    final hour = localHour;
+    if (hour == null) return null;
+    // The scene advances a few seconds per hour, so the sun drifts visibly.
+    final hourNow = hour + _elapsed / 3600;
+    if (hourNow <= _sunriseHour || hourNow >= _sunsetHour) return null;
+    return ((hourNow - _sunriseHour) / (_sunsetHour - _sunriseHour))
+        .clamp(0.0, 1.0)
+        .toDouble();
+  }
+
+  static const double _sunriseHour = 6.0;
+  static const double _sunsetHour = 18.0;
+
+  /// How dark the current hour is: 0 in full daylight, 1 at deep night, with
+  /// linear ramps across dawn and dusk.
+  double get _nightAmount {
+    final hour = localHour;
+    if (hour == null) return isDay ? 0.0 : 1.0;
+    final hourNow = hour + _elapsed / 3600;
+    // Wrap so a scene left running past midnight keeps a sane hour.
+    final at = hourNow % 24;
+    const dawnStart = 5.0, dawnEnd = 7.5;
+    const duskStart = 19.0, duskEnd = 21.0;
+
+    if (at <= dawnStart || at >= duskEnd) return 1.0;
+    if (at < dawnEnd) {
+      return ((dawnEnd - at) / (dawnEnd - dawnStart)).clamp(0.0, 1.0).toDouble();
+    }
+    if (at < duskStart) return 0.0;
+    return ((at - duskStart) / (duskEnd - duskStart)).clamp(0.0, 1.0).toDouble();
+  }
+
+  /// Strength of the warm sunrise/sunset cast, peaking at the horizon.
+  double get _goldenAmount {
+    final progress = _sunProgress;
+    if (progress == null) return 0.0;
+    // Fades out as the sun climbs away from the horizon.
+    final elevation = math.sin(progress * math.pi);
+    return ((1 - elevation) * .9).clamp(0.0, 1.0).toDouble();
+  }
+
+  /// The single light cast over the whole landscape layer, replacing the old
+  /// flat night rectangle. Zero alpha means full daylight.
+  ui.Color get _lightTint {
+    final night = _nightAmount;
+    final golden = _goldenAmount;
+    var alpha = (night * _nightWashMaxAlpha).round();
+    var color = _nightWashColor;
+    if (golden > 0) {
+      color = ui.Color.lerp(color, const ui.Color(0xFFFF9A55), .55)!;
+      alpha = math.max(alpha, (golden * 0x2E).round());
+    }
+    return ui.Color.fromARGB(
+      alpha.clamp(0, 255).toInt(),
+      (color.r * 255).round(),
+      (color.g * 255).round(),
+      (color.b * 255).round(),
+    );
+  }
+
   void _configureAmbientLife() {
+    _ambientCreatures.clear();
     _ambientCreatures.clear();
     void add(
       _AmbientKind kind, {
@@ -970,7 +1163,7 @@ class WeatherSceneGame extends FlameGame with TapCallbacks, LongPressCallbacks {
     final h = size.y;
     if (w <= 0 || h <= 0) return;
 
-    _rect(canvas, 0, 0, w, h, _skyColor);
+    _rect(canvas, 0, 0, w, h, debugLitSkyColor);
 
     final hour = localHour;
     if (isDay &&
@@ -1004,13 +1197,21 @@ class WeatherSceneGame extends FlameGame with TapCallbacks, LongPressCallbacks {
         !_rain &&
         !_fog &&
         const [0, 1, 2].contains(weatherCode)) {
+      final sunSize = _winterWorld ? .07 : .10;
+      final progress = _sunProgress ?? .8;
+      // Arcs from the east at sunrise to the west at sunset, sitting low and
+      // warm near the horizon and high and pale at noon.
+      final centre = ui.Offset(
+        w * (.14 + .72 * progress),
+        h * (.18 + .24 * math.sin(progress * math.pi)),
+      );
       final sun = _winterWorld
           ? const ui.Color(0xFFE5E8D8)
-          : const ui.Color(0xFFFFF0A6);
-      final sunSize = _winterWorld ? .07 : .10;
-      _rect(canvas, w * .80, h * .14, w * sunSize, h * sunSize, sun);
-      _rect(
-          canvas, w * .82, h * .12, w * sunSize * .60, h * sunSize * 1.35, sun);
+          : ui.Color.lerp(const ui.Color(0xFFFFB265),
+              const ui.Color(0xFFFFF0A6), math.sin(progress * math.pi))!;
+      _rect(canvas, centre.dx, centre.dy, w * sunSize, h * sunSize, sun);
+      _rect(canvas, centre.dx + w * .02, centre.dy - h * .02,
+          w * sunSize * .60, h * sunSize * 1.35, sun);
     } else if (!isDay &&
         !_storm &&
         !_rain &&
@@ -1019,9 +1220,18 @@ class WeatherSceneGame extends FlameGame with TapCallbacks, LongPressCallbacks {
         !_cyclone &&
         !_flood &&
         _cloudCoverage < 68) {
-      _rect(canvas, w * .78, h * .10, w * .075, h * .075,
-          const ui.Color(0xFFDDEBFF));
-      _rect(canvas, w * .80, h * .085, w * .055, h * .075, _skyColor);
+      // The moon runs the same arc as the sun, mirrored across the sky.
+      final progress = _sunProgress ?? .2;
+      final centre = ui.Offset(
+        w * (.86 - .72 * progress),
+        h * (.18 + .24 * math.sin(progress * math.pi)),
+      );
+      final moonSize = w * .075;
+      canvas.drawCircle(centre + ui.Offset(moonSize / 2, moonSize / 2),
+          moonSize / 2, ui.Paint()..color = const ui.Color(0xFFDDEBFF));
+      // A bite out of one side keeps it reading as a moon, not a ball.
+      canvas.drawCircle(centre + ui.Offset(moonSize * .84, moonSize * .30),
+          moonSize * .32, ui.Paint()..color = _skyColor);
     }
 
     if (!_desertHeat && !_sandstorm) {
@@ -1052,6 +1262,8 @@ class WeatherSceneGame extends FlameGame with TapCallbacks, LongPressCallbacks {
     }
 
     _rect(canvas, 0, h * .57, w, h * .43, _groundColor);
+    // The sea sits behind the near ground so coastal cities read as waterfronts.
+    _drawHorizonWater(canvas, w, h);
     final groundEdge = !isDay
         ? (_winterWorld
             ? const ui.Color(0xFF718995)
@@ -1122,9 +1334,17 @@ class WeatherSceneGame extends FlameGame with TapCallbacks, LongPressCallbacks {
       }
     }
 
+    // Mid-ground layer: terrain detail and the landmark slide together, and
+    // further than the far horizon beneath them, which gives the wind depth.
+    final midOffset = _parallaxMidOffset(w);
+    canvas.save();
+    canvas.translate(midOffset, 0);
     _drawTerrainDetails(canvas, w, h);
     if (_cold && !_snow && !_rain) _drawFrostDetails(canvas, w, h);
-    _drawCatalogLandmark(canvas, w, h);
+    if (debugHiddenLayers != DebugSceneLayers.withoutLandmark && debugHiddenLayers != DebugSceneLayers.withoutLandmarkAndCharacter) {
+      _drawCatalogLandmark(canvas, w, h);
+    }
+    canvas.restore();
     if (_rain) _drawWetGround(canvas, w, h);
 
     if (_cyclone) {
@@ -1141,12 +1361,17 @@ class WeatherSceneGame extends FlameGame with TapCallbacks, LongPressCallbacks {
       _drawRainyForest(canvas, w, h);
     }
 
-    if (!isDay) {
-      // Dim terrain and landmarks together while leaving the night sky visible.
+    // Light the landscape as one layer, driven by the hour: a cool wash after
+    // dusk and a warm cast at sunrise and sunset. Windows, lamps and the
+    // character's lantern are drawn afterwards so they stay bright against it.
+    final lightTint = _lightTint;
+    if (lightTint.a > 0) {
       canvas.drawRect(
         ui.Rect.fromLTWH(0, h * .42, w, h * .58),
-        ui.Paint()..color = const ui.Color(0x33202C4D),
+        ui.Paint()..color = lightTint,
       );
+    }
+    if (!isDay) {
       _drawNightLights(canvas, w, h);
     }
     _drawAmbientLife(canvas, w, h);
@@ -1165,19 +1390,24 @@ class WeatherSceneGame extends FlameGame with TapCallbacks, LongPressCallbacks {
             : _windy
                 ? math.min(_wind / 160, .11) * (windAngle == 0 ? 1 : windAngle)
                 : 0.0;
-    canvas.save();
-    canvas.translate(x, floor);
-    final characterUnit = math.max(2.0, math.min(w, h) * .014).toDouble();
-    if (_behavior.state == GoblinBehaviorState.play &&
-        !reduceFlashing &&
-        !reduceMotion) {
-      canvas.translate(0,
-          -math.sin(_behavior.actionProgress * math.pi) * characterUnit * 1.2);
+    if (debugHiddenLayers != DebugSceneLayers.withoutCharacter && debugHiddenLayers != DebugSceneLayers.withoutLandmarkAndCharacter) {
+      canvas.save();
+      canvas.translate(x, floor);
+      final characterUnit = math.max(2.0, math.min(w, h) * .014).toDouble();
+      if (_behavior.state == GoblinBehaviorState.play &&
+          !reduceFlashing &&
+          !reduceMotion) {
+        canvas.translate(
+            0,
+            -math.sin(_behavior.actionProgress * math.pi) *
+                characterUnit *
+                1.2);
+      }
+      canvas.rotate(lean);
+      if (_walkingLeft) canvas.scale(-1, 1);
+      _drawGoblin(canvas, w, h, x: 0, floor: 0);
+      canvas.restore();
     }
-    canvas.rotate(lean);
-    if (_walkingLeft) canvas.scale(-1, 1);
-    _drawGoblin(canvas, w, h, x: 0, floor: 0);
-    canvas.restore();
     if (_flood) _drawFloodAlert(canvas, w, h, floor, floodProgress);
     _drawLightning(canvas, w, h);
     // Short recovery vignette after a hit; no repeated strobing.
@@ -1333,8 +1563,10 @@ class WeatherSceneGame extends FlameGame with TapCallbacks, LongPressCallbacks {
       ui.Canvas canvas, double w, double h, double goblinX, double floor) {
     if (!_sunBeamActive) return;
     final phase = .5 + .5 * math.sin(_elapsed * 2.1);
-    final topX = w * .84;
-    final topY = h * .22;
+    // The beam leaves from wherever the sun is drawn, so light and source agree.
+    final progress = _sunProgress ?? .85;
+    final topX = w * (.14 + .72 * progress);
+    final topY = h * (.30 + .24 * math.sin(progress * math.pi));
     final targetY = floor - h * .20;
     final spread = w * (.022 + .006 * phase);
     final beam = ui.Path()
@@ -1368,6 +1600,10 @@ class WeatherSceneGame extends FlameGame with TapCallbacks, LongPressCallbacks {
 
     final unit = math.max(2.0, math.min(w, h) * .014).toDouble();
     final fontSize = (w * .033).clamp(10.0, 15.0).toDouble();
+    // With a landmark present the bubble shares the right-hand lane with the
+    // character, so it is laid out narrower and allowed an extra line rather than
+    // overflowing the frame edge.
+    final hasLandmark = location.landmark != WorldLandmark.none;
     final painter = TextPainter(
       text: TextSpan(
         text: message,
@@ -1379,8 +1615,8 @@ class WeatherSceneGame extends FlameGame with TapCallbacks, LongPressCallbacks {
         ),
       ),
       textDirection: ui.TextDirection.ltr,
-      maxLines: 3,
-    )..layout(maxWidth: w * .50);
+      maxLines: hasLandmark ? 4 : 3,
+    )..layout(maxWidth: w * (hasLandmark ? .40 : .50));
 
     const horizontalPadding = 9.0;
     const verticalPadding = 7.0;
@@ -1388,7 +1624,13 @@ class WeatherSceneGame extends FlameGame with TapCallbacks, LongPressCallbacks {
     final bubbleHeight = painter.height + verticalPadding * 2;
     final goblinX = w * _sceneX;
     final floor = _sceneFloor(h);
-    final left = (goblinX - bubbleWidth / 2).clamp(5.0, w - bubbleWidth - 5);
+    // The character keeps to the right-hand lane once a landmark is present, so
+    // the bubble is pushed with it. A centred bubble would sit over the landmark
+    // it just stopped covering.
+    final rightLimit = w - bubbleWidth - 5;
+    final left = hasLandmark
+        ? (goblinX - bubbleWidth * .28).clamp(w * .46, rightLimit).toDouble()
+        : (goblinX - bubbleWidth / 2).clamp(5.0, rightLimit);
     final top = (floor - unit * 30 - bubbleHeight - unit * 2)
         .clamp(6.0, h - bubbleHeight - 6);
     final bubble = ui.RRect.fromRectAndRadius(
@@ -1730,7 +1972,7 @@ class WeatherSceneGame extends FlameGame with TapCallbacks, LongPressCallbacks {
     }
     final floor = h * math.min(.82, .88 - .38 * p);
     if (p > .18) {
-      final raftX = w * .52;
+      final raftX = w * .40;
       _rect(canvas, raftX - w * .075, floor + h * .005, w * .15, h * .022,
           const ui.Color(0xFF8C5B34));
       for (var i = 0; i < 4; i++) {
@@ -1814,7 +2056,8 @@ class WeatherSceneGame extends FlameGame with TapCallbacks, LongPressCallbacks {
     final pulse = reduceFlashing || reduceMotion
         ? 1.0
         : .96 + .04 * math.sin(_elapsed * 3.5);
-    final x = w * .52;
+    // Sits above the raft the character is paddling, not over him.
+    final x = w * .40;
     _rect(canvas, x + w * .045, floor - h * .43, w * .052 * pulse,
         h * .095 * pulse, const ui.Color(0xFFCF343A));
     _rect(canvas, x + w * .066, floor - h * .412, w * .010, h * .043,
@@ -1876,9 +2119,43 @@ class WeatherSceneGame extends FlameGame with TapCallbacks, LongPressCallbacks {
     }
   }
 
+  /// Horizontal shift applied to landmark artwork, as a fraction of width.
+  ///
+  /// Measured footprints showed every landmark straddling the centre, so the
+  /// character always overlapped whatever the landmark exists to show. Nudging
+  /// the landmark left frees the right third of the scene as a character lane.
+  static const double _landmarkShiftX = -.025;
+
+  /// Base parallax magnification for the mid-ground, in scene-width fractions
+  /// per unit of normalised wind. Distant layers use a smaller factor and the
+  /// character's own layer stays fixed, so wind reads as depth rather than as a
+  /// sliding picture.
+  static const double _parallaxMidScale = .022;
+
+  /// Lateral offset for the mid-ground layer, in logical pixels.
+  ///
+  /// Wind pushes near layers further than far ones. Everything is anchored to
+  /// the scene centre so nothing drifts off the left edge on a strong blow.
+  double _parallaxMidOffset(double w) {
+    final wind = (_wind / 160).clamp(0.0, 1.0).toDouble();
+    // The wind bearing decides which way the near layers lean. Only the sign
+    // matters: a wind blowing across the scene still pushes it sideways.
+    final bearing = math.cos(windDirectionDeg * math.pi / 180);
+    final direction = bearing == 0 ? 1.0 : bearing.sign;
+    final magnitude = w * _parallaxMidScale * wind;
+    return magnitude * direction * _environmentMotionScale;
+  }
+
   /// Landmark selection is stable for a city; weather and season are layered
   /// around it so the location remains recognizable after refreshes.
   void _drawCatalogLandmark(ui.Canvas canvas, double w, double h) {
+    canvas.save();
+    canvas.translate(w * _landmarkShiftX, 0);
+    _drawCatalogLandmarkArt(canvas, w, h);
+    canvas.restore();
+  }
+
+  void _drawCatalogLandmarkArt(ui.Canvas canvas, double w, double h) {
     final stone = !isDay
         ? const ui.Color(0xFF647283)
         : _winterWorld
@@ -2588,44 +2865,144 @@ class WeatherSceneGame extends FlameGame with TapCallbacks, LongPressCallbacks {
     }
   }
 
-  void _drawHorizon(ui.Canvas canvas, double w, double h) {
-    final far = _winterWorld
-        ? const ui.Color(0xFF789CAE)
-        : _hot
-            ? const ui.Color(0xFFB77A48)
-            : _storm
-                ? const ui.Color(0xFF203944)
-                : _autumnWorld
-                    ? const ui.Color(0xFF77513A)
-                    : _winterSeason
-                        ? const ui.Color(0xFF625F59)
-                        : const ui.Color(0xFF376B59);
-    final near = _winterWorld
-        ? const ui.Color(0xFFAAC6D1)
-        : _hot
-            ? const ui.Color(0xFFD69A54)
-            : _storm
-                ? const ui.Color(0xFF2C4A4C)
-                : _autumnWorld
-                    ? const ui.Color(0xFF986643)
-                    : _winterSeason
-                        ? const ui.Color(0xFF797365)
-                        : _summerWorld
-                            ? const ui.Color(0xFF54804B)
-                            : const ui.Color(0xFF477A5D);
-    final ridge = ui.Path()
-      ..moveTo(0, h * .57)
-      ..lineTo(w * .12, h * .49)
-      ..lineTo(w * .22, h * .54)
-      ..lineTo(w * .38, h * .465)
-      ..lineTo(w * .53, h * .55)
-      ..lineTo(w * .69, h * .48)
-      ..lineTo(w * .82, h * .53)
-      ..lineTo(w, h * .46)
-      ..lineTo(w, h * .60)
-      ..lineTo(0, h * .60)
+  /// Distant silhouette family, chosen from the location's biome so an urban
+  /// city does not sit in front of green hills and a desert does not sit in
+  /// front of a forest ridge.
+  _HorizonKind get _horizonKind => switch (location.biome) {
+        WorldBiome.desert || WorldBiome.coldDesert => _HorizonKind.dune,
+        WorldBiome.mountain => _HorizonKind.mountain,
+        WorldBiome.urban => _HorizonKind.skyline,
+        WorldBiome.coastal => _HorizonKind.coast,
+        WorldBiome.river => _HorizonKind.riverPlain,
+        WorldBiome.tropical => _HorizonKind.canopy,
+        WorldBiome.temperate => _HorizonKind.woodedRidge,
+      };
+
+  /// Far horizon colour: biome-tinted, then shifted by weather and season.
+  ui.Color get _horizonFarColor {
+    final base = switch (location.biome) {
+      WorldBiome.desert || WorldBiome.coldDesert => const ui.Color(0xFFC79A5E),
+      WorldBiome.mountain => const ui.Color(0xFF6E8290),
+      WorldBiome.urban => const ui.Color(0xFF5C6472),
+      WorldBiome.coastal => const ui.Color(0xFF4E7E92),
+      WorldBiome.river => const ui.Color(0xFF4F7A6C),
+      WorldBiome.tropical => const ui.Color(0xFF2F6B52),
+      WorldBiome.temperate => const ui.Color(0xFF3B6B57),
+    };
+    if (_winterWorld) return ui.Color.lerp(base, const ui.Color(0xFF9FBACD), .72)!;
+    if (_storm) return ui.Color.lerp(base, const ui.Color(0xFF1B2E38), .68)!;
+    if (_hot) return ui.Color.lerp(base, const ui.Color(0xFFC9853F), .42)!;
+    if (_autumnWorld) return ui.Color.lerp(base, const ui.Color(0xFF8A5B3A), .45)!;
+    if (_winterSeason) return ui.Color.lerp(base, const ui.Color(0xFF7A746A), .55)!;
+    return base;
+  }
+
+  /// Near horizon colour, kept a shade lighter than [_horizonFarColor].
+  ui.Color get _horizonNearColor {
+    final base = switch (location.biome) {
+      WorldBiome.desert || WorldBiome.coldDesert => const ui.Color(0xFFDCB073),
+      WorldBiome.mountain => const ui.Color(0xFF87999F),
+      WorldBiome.urban => const ui.Color(0xFF78808E),
+      WorldBiome.coastal => const ui.Color(0xFF6E9CAA),
+      WorldBiome.river => const ui.Color(0xFF639381),
+      WorldBiome.tropical => const ui.Color(0xFF3F8663),
+      WorldBiome.temperate => const ui.Color(0xFF4B8465),
+    };
+    if (_winterWorld) return ui.Color.lerp(base, const ui.Color(0xFFD6E6EE), .66)!;
+    if (_storm) return ui.Color.lerp(base, const ui.Color(0xFF2C4A4C), .55)!;
+    if (_hot) return ui.Color.lerp(base, const ui.Color(0xFFE3AC66), .38)!;
+    if (_autumnWorld) return ui.Color.lerp(base, const ui.Color(0xFFA4713F), .40)!;
+    if (_winterSeason) return ui.Color.lerp(base, const ui.Color(0xFF918A7C), .45)!;
+    return base;
+  }
+
+  /// Sea tone for coastal and river horizons, reflected off the current sky.
+  ui.Color get _horizonWaterColor => ui.Color.lerp(
+        !isDay || _storm
+            ? const ui.Color(0xFF22475F)
+            : const ui.Color(0xFF2F6E88),
+        _skyColor,
+        .18,
+      )!;
+
+  ui.Path _horizonRidgePath(double w, double h) {
+    final path = ui.Path();
+    switch (_horizonKind) {
+      case _HorizonKind.mountain:
+        path
+          ..moveTo(0, h * .58)
+          ..lineTo(w * .10, h * .44)
+          ..lineTo(w * .17, h * .52)
+          ..lineTo(w * .30, h * .40)
+          ..lineTo(w * .43, h * .53)
+          ..lineTo(w * .57, h * .42)
+          ..lineTo(w * .70, h * .52)
+          ..lineTo(w * .84, h * .45)
+          ..lineTo(w, h * .55);
+      case _HorizonKind.dune:
+        path
+          ..moveTo(0, h * .56)
+          ..quadraticBezierTo(w * .17, h * .47, w * .35, h * .545)
+          ..quadraticBezierTo(w * .52, h * .60, w * .68, h * .495)
+          ..quadraticBezierTo(w * .86, h * .43, w, h * .53);
+      case _HorizonKind.skyline:
+        // Blocky distant towers: vertical steps read as a city edge.
+        path.moveTo(0, h * .60);
+        var skylineX = 0.0;
+        var tower = 0;
+        while (skylineX < w) {
+          final towerW = w * (.045 + (tower % 3) * .022);
+          final towerTop = h * (.545 - (tower * 7 % 11) / 100);
+          path
+            ..lineTo(skylineX, towerTop)
+            ..lineTo(skylineX + towerW, towerTop);
+          skylineX += towerW;
+          tower++;
+        }
+        path.lineTo(w, h * .60);
+      case _HorizonKind.coast:
+        path
+          ..moveTo(0, h * .575)
+          ..quadraticBezierTo(w * .22, h * .525, w * .45, h * .565)
+          ..quadraticBezierTo(w * .70, h * .605, w, h * .545);
+      case _HorizonKind.canopy:
+        // Rounded canopy humps instead of a sawtooth ridge.
+        path.moveTo(0, h * .575);
+        for (var i = 0; i < 7; i++) {
+          path.quadraticBezierTo(
+            w * (i + .5) / 7,
+            h * (.47 + (i % 3) * .022),
+            w * (i + 1) / 7,
+            h * (.565 + (i % 2) * .012),
+          );
+        }
+      case _HorizonKind.riverPlain:
+        path
+          ..moveTo(0, h * .575)
+          ..quadraticBezierTo(w * .30, h * .535, w * .55, h * .565)
+          ..quadraticBezierTo(w * .78, h * .59, w, h * .55);
+      case _HorizonKind.woodedRidge:
+        path
+          ..moveTo(0, h * .57)
+          ..lineTo(w * .12, h * .49)
+          ..lineTo(w * .22, h * .54)
+          ..lineTo(w * .38, h * .465)
+          ..lineTo(w * .53, h * .55)
+          ..lineTo(w * .69, h * .48)
+          ..lineTo(w * .82, h * .53)
+          ..lineTo(w, h * .46);
+    }
+    return path
+      ..lineTo(w, h * .62)
+      ..lineTo(0, h * .62)
       ..close();
-    canvas.drawPath(ridge, ui.Paint()..color = far);
+  }
+
+  void _drawHorizon(ui.Canvas canvas, double w, double h) {
+    final far = _horizonFarColor;
+    final near = _horizonNearColor;
+    canvas.drawPath(
+        _horizonRidgePath(w, h), ui.Paint()..color = far);
     final lowland = ui.Path()
       ..moveTo(0, h * .59)
       ..lineTo(w * .18, h * .545)
@@ -2639,12 +3016,32 @@ class WeatherSceneGame extends FlameGame with TapCallbacks, LongPressCallbacks {
       ..close();
     canvas.drawPath(lowland, ui.Paint()..color = near);
     if (_winterWorld) {
-      final snowLine = ui.Paint()..color = const ui.Color(0xCCECF8FC);
-      for (var i = 0; i < 6; i++) {
-        final x = w * (.12 + i * .14);
-        _rect(canvas, x, h * (.50 + (i % 2) * .025), w * .045, h * .012,
-            snowLine.color);
-      }
+      // A snow line traces the ridge instead of floating rectangles.
+      final snowLine = ui.Paint()
+        ..color = const ui.Color(0xCCECF8FC)
+        ..style = ui.PaintingStyle.stroke
+        ..strokeWidth = math.max(1.5, h * .012);
+      canvas.drawPath(_horizonRidgePath(w, h), snowLine);
+    }
+  }
+
+  /// Sea band drawn behind the ground so a coastal or river city reads as a
+  /// waterfront rather than a field.
+  void _drawHorizonWater(ui.Canvas canvas, double w, double h) {
+    if (_horizonKind != _HorizonKind.coast &&
+        _horizonKind != _HorizonKind.riverPlain) {
+      return;
+    }
+    final water = _horizonWaterColor;
+    final top = h * .585;
+    _rect(canvas, 0, top, w, h * .60 - top, water);
+    // Bright horizon edge where the sea meets the sky.
+    _rect(canvas, 0, top, w, math.max(1.5, h * .004),
+        ui.Color.lerp(water, const ui.Color(0xFFFFFFFF), .22)!);
+    for (var i = 0; i < 6; i++) {
+      final x = w * ((i * 37 % 91) / 100);
+      _rect(canvas, x, h * (.592 + (i % 3) * .004), w * .06,
+          math.max(1.0, h * .0035), const ui.Color(0x55DCEFF4));
     }
   }
 
@@ -3025,6 +3422,333 @@ class WeatherSceneGame extends FlameGame with TapCallbacks, LongPressCallbacks {
 
   void _drawGoblin(ui.Canvas canvas, double w, double h,
       {required double x, required double floor}) {
+    final sprites = _sprites;
+    if (sprites != null && !sprites.isEmpty) {
+      _drawGoblinSprite(canvas, w, h, x: x, floor: floor, sprites: sprites);
+      return;
+    }
+    _drawGoblinProcedural(canvas, w, h, x: x, floor: floor);
+  }
+
+  /// Draws the loaded sprite frames with the same weather effects the
+  /// procedural character used, so the reactions survive the art change.
+  void _drawGoblinSprite(ui.Canvas canvas, double w, double h,
+      {required double x,
+      required double floor,
+      required GoblinSprites sprites}) {
+    final hit = _hitRecovery > 0 && _directHit;
+    final chatting = _dialogueAge > 0;
+    final behavior = _behavior.state;
+    final poseState = behavior == GoblinBehaviorState.recover
+        ? _behavior.previousState
+        : behavior;
+    final rawActionBlend = behavior == GoblinBehaviorState.recover
+        ? 1 - _behavior.actionProgress
+        : behavior == GoblinBehaviorState.idle
+            ? 0.0
+            : (_behavior.stateAge / .28).clamp(0.0, 1.0).toDouble();
+    final actionBlend =
+        rawActionBlend * rawActionBlend * (3 - 2 * rawActionBlend);
+    final resting = poseState == GoblinBehaviorState.rest;
+    final sleeping = poseState == GoblinBehaviorState.sleep;
+    final sitBlend =
+        (resting || sleeping) ? actionBlend : 0.0;
+    final nearMiss = _strikeAge < .42 && !_directHit && _thunderstorm;
+    final unit = math.max(2.0, math.min(w, h) * .014).toDouble();
+    final motionScale = reduceFlashing || reduceMotion ? .55 : 1.0;
+    final shiver = _cold ? math.sin(_elapsed * 7.5) * .65 * motionScale : 0.0;
+    final gustLean =
+        _windy ? (math.min(_wind / 160, .22) * 18).toDouble() : 0.0;
+    x += shiver + gustLean;
+
+    // The sprite stands 31 scene units tall in the procedural scale, which
+    // keeps every effect offset below aligned with the drawn character.
+    const spriteHeightUnits = 31.0;
+    final spriteWidth = unit *
+        (spriteHeightUnits * sprites.frameWidth / sprites.frameHeight) *
+        (1 - .18 * sitBlend);
+    final spriteHeight = unit * spriteHeightUnits * (1 - .18 * sitBlend);
+    final spriteLeft = x - spriteWidth / 2;
+    // Seat the frame's feet row on the scene floor.
+    final feetOffset =
+        unit * spriteHeightUnits * (sprites.frameHeight - sprites.feetY) /
+            sprites.frameHeight;
+    final spriteTop = floor + feetOffset - spriteHeight;
+
+    // Ground shadow, matching the procedural contact shadow.
+    canvas.drawOval(
+      ui.Rect.fromCenter(
+          center: ui.Offset(x, floor + unit * .8),
+          width: hit ? unit * 8 : unit * 11,
+          height: unit * 1.5),
+      ui.Paint()..color = const ui.Color(0x88030A0B),
+    );
+
+    final sprite = _walking
+        ? sprites.walkFrameAt(_behavior.stateAge * _strideSpeed / 7)
+        : sprites.idleFrameAt(_elapsed);
+    final dest = ui.Rect.fromLTWH(
+        spriteLeft, spriteTop, spriteWidth, spriteHeight);
+    canvas.save();
+    if (_walkingLeft) {
+      canvas.translate(x, floor);
+      canvas.scale(-1, 1);
+      canvas.translate(-x, -floor);
+    }
+    sprite.render(
+      canvas,
+      position: Vector2(dest.left, dest.top),
+      size: Vector2(dest.width, dest.height),
+      overridePaint: ui.Paint()..filterQuality = ui.FilterQuality.none,
+    );
+    canvas.restore();
+
+    // Weather tinting replaces the procedural body recolouring. It is applied
+    // inside a layer with srcATop so the wash lands on the character's pixels
+    // only, instead of reading as a coloured box around him.
+    final tint = hit
+        ? const ui.Color(0xCC20262A)
+        : _cold
+            ? const ui.Color(0x4D86C5E7)
+            : (_sunBeamActive || _heatStress)
+                ? ui.Color.lerp(const ui.Color(0x00C94E43),
+                    const ui.Color(0x80C94E43), _sunHeatProgress)
+                : null;
+    if (tint != null && tint.a > 0) {
+      final bounds = dest.inflate(unit * 2);
+      canvas.saveLayer(bounds, ui.Paint());
+      sprite.render(
+        canvas,
+        position: Vector2(dest.left, dest.top),
+        size: Vector2(dest.width, dest.height),
+        overridePaint: ui.Paint()..filterQuality = ui.FilterQuality.none,
+      );
+      // The sprite drawn a second time with plain srcIn supplies the alpha mask,
+      // so the wash lands on the character's pixels only.
+      sprite.render(
+        canvas,
+        position: Vector2(dest.left, dest.top),
+        size: Vector2(dest.width, dest.height),
+        overridePaint: ui.Paint()
+          ..color = tint
+          ..blendMode = ui.BlendMode.srcIn,
+      );
+      canvas.restore();
+    }
+
+    _drawGoblinEffects(canvas, w, h,
+        x: x,
+        floor: floor,
+        unit: unit,
+        hit: hit,
+        chatting: chatting,
+        sleeping: sleeping || resting,
+        yawning: poseState == GoblinBehaviorState.yawn,
+        scratching: poseState == GoblinBehaviorState.lookAround &&
+            _behavior.actionTarget == 'scratch',
+        nearMiss: nearMiss,
+        wipingBrow:
+            (_heatStress || _sunBeamActive) && !_walking && _elapsed % 3 < .7,
+        paddling: _flood && _elapsed >= 4.5,
+        motionScale: motionScale);
+  }
+
+  /// Shared weather and prop overlays drawn on top of the character.
+  void _drawGoblinEffects(ui.Canvas canvas, double w, double h,
+      {required double x,
+      required double floor,
+      required double unit,
+      required bool hit,
+      required bool chatting,
+      required bool sleeping,
+      required bool yawning,
+      required bool scratching,
+      required bool nearMiss,
+      required bool wipingBrow,
+      required bool paddling,
+      required double motionScale}) {
+    // Matches the sprite's green skin so the overlay hands read as his own.
+    const skin = ui.Color(0xFF9BC96B);
+    if (chatting) {
+      final wave = .5 + .5 * math.sin(_elapsed * 12);
+      _rect(canvas, x + unit * 4.5, floor - unit * 15, unit * 2, unit * 4, skin);
+      _rect(canvas, x + unit * 5, floor - unit * (18 + wave), unit * 2.5,
+          unit * 2, skin);
+    }
+    if (wipingBrow) {
+      _rect(canvas, x + unit * 2, floor - unit * 19, unit * 5, unit * 2, skin);
+      _rect(canvas, x + unit * 5, floor - unit * 18, unit * 2, unit * 2,
+          const ui.Color(0xFF73E4FF));
+    }
+    if (scratching) {
+      _rect(canvas, x + unit * 2.2, floor - unit * 20, unit * 3.2, unit * 2,
+          skin);
+    }
+    if (_behavior.state == GoblinBehaviorState.weatherReact &&
+        _behavior.actionTarget == 'snow') {
+      _rect(canvas, x + unit * 6, floor - unit * 18, unit * 4.5, unit, skin);
+      final flakeX = x + unit * (9 + math.sin(_elapsed * 1.3) * 1.5);
+      final flakeY = floor - unit * (20 + math.sin(_elapsed * 1.6) * .8);
+      _rect(canvas, flakeX, flakeY, unit, unit, const ui.Color(0xFFE8FAFF));
+    }
+    if (_rain && _walking) {
+      final splashY = floor - unit * .5;
+      _rect(canvas, x - unit * 7, splashY, unit * 2, unit,
+          const ui.Color(0xAA9BC9D7));
+      _rect(canvas, x + unit * 5, splashY - unit, unit * 2, unit,
+          const ui.Color(0xAA9BC9D7));
+    }
+    if (paddling) {
+      final paddleAngle = math.sin(_elapsed * 3.2) * .48;
+      canvas.save();
+      canvas.translate(x + unit * 6, floor - unit * 9);
+      canvas.rotate(paddleAngle);
+      canvas.drawLine(
+          const ui.Offset(0, 0),
+          ui.Offset(unit * 11, unit * 8),
+          ui.Paint()
+            ..color = const ui.Color(0xFF79543A)
+            ..strokeWidth = unit * 1.3);
+      _rect(canvas, unit * 8, unit * 6, unit * 4, unit * 2,
+          const ui.Color(0xFFB07A42));
+      canvas.restore();
+    }
+
+    // Lantern on the goblin's left side; its glow warms the nearby ground.
+    final lantern = ui.Offset(x - unit * 7, floor - unit * 9);
+    final lanternLit =
+        !_desertHeat && !_sandstorm && (!isDay || _storm || _fog || nearMiss);
+    if (lanternLit) {
+      final glowR =
+          unit * (nearMiss ? 10 : 7) * (0.92 + .08 * math.sin(_elapsed * 4));
+      canvas.drawCircle(
+          lantern,
+          glowR,
+          ui.Paint()
+            ..shader = ui.Gradient.radial(
+              lantern,
+              glowR,
+              const [ui.Color(0x66FFD16B), ui.Color(0x00FF9D36)],
+            ));
+    }
+    _rect(
+        canvas,
+        lantern.dx - unit,
+        lantern.dy - unit * 1.5,
+        unit * 2,
+        unit * 3,
+        lanternLit ? const ui.Color(0xFFFFC857) : const ui.Color(0xFF79543A));
+    _rect(canvas, lantern.dx - unit * .5, lantern.dy - unit, unit, unit * 2,
+        lanternLit ? const ui.Color(0xFFFFF1A8) : const ui.Color(0xFFB08A56));
+
+    if (_heatStress || _sunBeamActive) {
+      final heatProgress = _sunHeatProgress;
+      final sweatCount = heatProgress > .35 ? 4 : 2;
+      for (var i = 0; i < sweatCount; i++) {
+        final sx = x + unit * (4 + i * 1.4);
+        final sy = floor - unit * (18 - ((_elapsed * 5 + i * 3) % 8));
+        _rect(
+            canvas, sx, sy, unit * .8, unit * 1.4, const ui.Color(0xFF73E4FF));
+      }
+    }
+    if (_cold) {
+      // Scarf wrapped at the neck, mittens over the hands, pink cheeks and
+      // visible breath. Offsets are aligned to the sprite's own proportions
+      // (hood down to about 18 units, hands near 13 units).
+      _rect(canvas, x - unit * 3.6, floor - unit * 15.4, unit * 7.2, unit * 1.7,
+          const ui.Color(0xFF8A5362));
+      _rect(canvas, x + unit * 2.4, floor - unit * 15.2, unit * 1.6, unit * 2.8,
+          const ui.Color(0xFF6B4852));
+      _rect(canvas, x - unit * 4, floor - unit * 14.6, unit * 1.7, unit * 2.6,
+          const ui.Color(0xFF6B4852));
+      final breathPhase = _elapsed % 2.8;
+      if (breathPhase < 1.5) {
+        final opacity = ((1 - breathPhase / 1.5) * 90).round().clamp(0, 90);
+        final breathColor = ui.Color.fromARGB(opacity, 227, 245, 250);
+        final bx = x + unit * (7 + breathPhase * 2.5);
+        final by = floor - unit * (17 + breathPhase * 2.2);
+        canvas.drawCircle(
+            ui.Offset(bx, by), unit * 1.8, ui.Paint()..color = breathColor);
+        canvas.drawCircle(ui.Offset(bx + unit * 2.1, by - unit * .8),
+            unit * 1.2, ui.Paint()..color = breathColor);
+      }
+    }
+    if (_windy) {
+      // Hood tail points away from the wind direction.
+      _rect(
+          canvas,
+          x - unit * (7 + math.min(_wind / 15, 7).toDouble()),
+          floor - unit * 19,
+          unit * math.min(_wind / 15, 7).toDouble(),
+          unit * 2,
+          _sandstorm ? const ui.Color(0xFFB94F2D) : const ui.Color(0xFFE6A34A));
+    }
+    if (_sandstorm) {
+      // Goggles and wrapped scarf protect him from blowing sand.
+      _rect(canvas, x - unit * 3.2, floor - unit * 17.5, unit * 6.8, unit * 2.4,
+          const ui.Color(0xFF342D2A));
+      _rect(canvas, x - unit * 2.6, floor - unit * 17.1, unit * 2.1,
+          unit * 1.35, const ui.Color(0xFF8AD4D4));
+      _rect(canvas, x + unit * .4, floor - unit * 17.1, unit * 2.1, unit * 1.35,
+          const ui.Color(0xFF8AD4D4));
+      _rect(canvas, x - unit * 4.4, floor - unit * 11, unit * 8.8, unit * 2.2,
+          const ui.Color(0xFFC65B32));
+    }
+    if ((_desertHeat && _elapsed >= 8) ||
+        (_sunBeamActive && _sunExposure >= 8 && temperatureC >= 36)) {
+      final dizzy = .5 + .5 * math.sin(_elapsed * 5);
+      for (var i = 0; i < 3; i++) {
+        final angle = _elapsed * 2 + i * math.pi * 2 / 3;
+        _rect(
+            canvas,
+            x + math.cos(angle) * unit * 8,
+            floor - unit * 29 + math.sin(angle) * unit * 2,
+            unit * dizzy,
+            unit * dizzy,
+            const ui.Color(0xFFFFF1A8));
+      }
+    }
+    if (sleeping && !hit) {
+      // No dedicated sleeping frame exists, so a slow bob plus closed-eye marks
+      // reads as dozing without pretending to be a real animation.
+      final zzz = (_elapsed % 2.4) / 2.4;
+      final opacity = ((1 - zzz) * 200).round().clamp(0, 200);
+      for (var i = 0; i < 2; i++) {
+        final size = unit * (1.1 + i * .5);
+        _rect(
+            canvas,
+            x + unit * (5 + i * 2.4),
+            floor - unit * (24 + i * 3 + zzz * 3),
+            size,
+            size * .35,
+            ui.Color.fromARGB(opacity, 232, 244, 255));
+      }
+    }
+    if (yawning) {
+      final open = (unit * 1.6 * motionScale).clamp(unit * .4, unit * 2.2);
+      canvas.drawOval(
+          ui.Rect.fromCenter(
+              center: ui.Offset(x, floor - unit * 13.5),
+              width: open,
+              height: open * 1.1),
+          ui.Paint()..color = const ui.Color(0xFF263238));
+    }
+    if (hit) {
+      // Smoke puffs rise briefly after impact.
+      for (var i = 0; i < 4; i++) {
+        final sy = floor - unit * (29 + ((_elapsed * 8 + i * 5) % 12));
+        canvas.drawCircle(
+            ui.Offset(x + unit * (i - 2) * 2, sy),
+            unit * (1.3 + i * .15),
+            ui.Paint()..color = const ui.Color(0x557C858B));
+      }
+    }
+  }
+
+  /// Unused while sprite assets are present; kept as the fallback when the
+  /// frames cannot be loaded.
+  void _drawGoblinProcedural(ui.Canvas canvas, double w, double h,
+      {required double x, required double floor}) {
     final hit = _hitRecovery > 0 && _directHit;
     final chatting = _dialogueAge > 0;
     final behavior = _behavior.state;
@@ -3219,195 +3943,19 @@ class WeatherSceneGame extends FlameGame with TapCallbacks, LongPressCallbacks {
           hit ? const ui.Color(0xFF171717) : const ui.Color(0xFF356044));
     }
     canvas.restore();
-    if (chatting) {
-      final wave = .5 + .5 * math.sin(_elapsed * 12);
-      _rect(
-          canvas, x + unit * 4.5, floor - unit * 15, unit * 2, unit * 4, skin);
-      _rect(canvas, x + unit * 5, floor - unit * (18 + wave), unit * 2.5,
-          unit * 2, skin);
-    }
-
-    if (wipingBrow) {
-      _rect(canvas, x + unit * 2, floor - unit * 19, unit * 5, unit * 2, skin);
-      _rect(canvas, x + unit * 5, floor - unit * 18, unit * 2, unit * 2,
-          const ui.Color(0xFF73E4FF));
-    }
-    if (scratching) {
-      _rect(canvas, x + unit * 2.2, floor - unit * 20, unit * 3.2, unit * 2,
-          skin);
-    }
-    if (_behavior.state == GoblinBehaviorState.weatherReact &&
-        _behavior.actionTarget == 'snow') {
-      _rect(canvas, x + unit * 6, floor - unit * 18, unit * 4.5, unit, skin);
-      final flakeX = x + unit * (9 + math.sin(_elapsed * 1.3) * 1.5);
-      final flakeY = floor - unit * (20 + math.sin(_elapsed * 1.6) * .8);
-      _rect(canvas, flakeX, flakeY, unit, unit, const ui.Color(0xFFE8FAFF));
-    }
-    if (_rain && _walking && stride > .7) {
-      final splashY = floor - unit * .5;
-      _rect(canvas, x - unit * 7, splashY, unit * 2, unit,
-          const ui.Color(0xAA9BC9D7));
-      _rect(canvas, x + unit * 5, splashY - unit, unit * 2, unit,
-          const ui.Color(0xAA9BC9D7));
-    }
-    if (paddling) {
-      final paddleAngle = math.sin(_elapsed * 3.2) * .48;
-      canvas.save();
-      canvas.translate(x + unit * 6, floor - unit * 9);
-      canvas.rotate(paddleAngle);
-      canvas.drawLine(
-          const ui.Offset(0, 0),
-          ui.Offset(unit * 11, unit * 8),
-          ui.Paint()
-            ..color = const ui.Color(0xFF79543A)
-            ..strokeWidth = unit * 1.3);
-      _rect(canvas, unit * 8, unit * 6, unit * 4, unit * 2,
-          const ui.Color(0xFFB07A42));
-      canvas.restore();
-    }
-
-    // Lantern on the goblin's left side; its glow warms the nearby ground.
-    final lantern = ui.Offset(x - unit * 7, floor - unit * 9);
-    final lanternLit =
-        !_desertHeat && !_sandstorm && (!isDay || _storm || _fog || nearMiss);
-    if (lanternLit) {
-      final glowR =
-          unit * (nearMiss ? 10 : 7) * (0.92 + .08 * math.sin(_elapsed * 4));
-      canvas.drawCircle(
-          lantern,
-          glowR,
-          ui.Paint()
-            ..shader = ui.Gradient.radial(
-              lantern,
-              glowR,
-              const [ui.Color(0x66FFD16B), ui.Color(0x00FF9D36)],
-            ));
-    }
-    _rect(
-        canvas,
-        lantern.dx - unit,
-        lantern.dy - unit * 1.5,
-        unit * 2,
-        unit * 3,
-        lanternLit ? const ui.Color(0xFFFFC857) : const ui.Color(0xFF79543A));
-    _rect(canvas, lantern.dx - unit * .5, lantern.dy - unit, unit, unit * 2,
-        lanternLit ? const ui.Color(0xFFFFF1A8) : const ui.Color(0xFFB08A56));
-
-    if (_heatStress || _sunBeamActive) {
-      // Sweat droplets intensify as temperatures rise.
-      final sweatCount = heatProgress > .35 ? 4 : 2;
-      for (var i = 0; i < sweatCount; i++) {
-        final sx = x + unit * (4 + i * 1.4);
-        final sy = floor - unit * (18 - ((_elapsed * 5 + i * 3) % 8));
-        _rect(
-            canvas, sx, sy, unit * .8, unit * 1.4, const ui.Color(0xFF73E4FF));
-      }
-      if (heatProgress > .65) {
-        for (var i = 0; i < 3; i++) {
-          final sx = x + unit * (5 + i * 2);
-          canvas.drawLine(
-              ui.Offset(sx, floor - unit * 25),
-              ui.Offset(sx + unit, floor - unit * 28),
-              ui.Paint()
-                ..color = const ui.Color(0x77FFF1C4)
-                ..strokeWidth = 1.5);
-        }
-      }
-    }
-    if (_cold) {
-      // A wrapped scarf, mittens, pink cheeks, and visible breath sell the cold.
-      _rect(canvas, x - unit * 4.5, floor - unit * 12.5, unit * 9, unit * 2.2,
-          const ui.Color(0xFF8A5362));
-      _rect(canvas, x - unit * 6.5, floor - unit * 9, unit * 2.2, unit * 2,
-          const ui.Color(0xFF6B4852));
-      _rect(canvas, x + unit * 4.3, floor - unit * 9, unit * 2.2, unit * 2,
-          const ui.Color(0xFF6B4852));
-      _rect(canvas, x - unit * 3.3, floor - unit * 14, unit, unit,
-          const ui.Color(0xFFB97180));
-      _rect(canvas, x + unit * 2.2, floor - unit * 14, unit, unit,
-          const ui.Color(0xFFB97180));
-      final breathPhase = _elapsed % 2.8;
-      if (breathPhase < 1.5) {
-        final opacity = ((1 - breathPhase / 1.5) * 90).round().clamp(0, 90);
-        final breathColor = ui.Color.fromARGB(opacity, 227, 245, 250);
-        final bx = x + unit * (7 + breathPhase * 2.5);
-        final by = floor - unit * (17 + breathPhase * 2.2);
-        canvas.drawCircle(
-            ui.Offset(bx, by), unit * 1.8, ui.Paint()..color = breathColor);
-        canvas.drawCircle(ui.Offset(bx + unit * 2.1, by - unit * .8),
-            unit * 1.2, ui.Paint()..color = breathColor);
-      }
-    }
-    if (_windy) {
-      // Scarf/hood tail points away from the wind direction.
-      _rect(
-          canvas,
-          x - unit * (7 + math.min(_wind / 15, 7).toDouble()),
-          floor - unit * 19,
-          unit * math.min(_wind / 15, 7).toDouble(),
-          unit * 2,
-          _sandstorm ? const ui.Color(0xFFB94F2D) : const ui.Color(0xFFE6A34A));
-    }
-    if (_sandstorm) {
-      // Broad goggles and a wrapped scarf protect him from blowing sand.
-      _rect(canvas, x - unit * 3.2, floor - unit * 17.5, unit * 6.8, unit * 2.4,
-          const ui.Color(0xFF342D2A));
-      _rect(canvas, x - unit * 2.6, floor - unit * 17.1, unit * 2.1,
-          unit * 1.35, const ui.Color(0xFF8AD4D4));
-      _rect(canvas, x + unit * .4, floor - unit * 17.1, unit * 2.1, unit * 1.35,
-          const ui.Color(0xFF8AD4D4));
-      _rect(canvas, x - unit * 4.4, floor - unit * 11, unit * 8.8, unit * 2.2,
-          const ui.Color(0xFFC65B32));
-    }
-    if ((_desertHeat && _elapsed >= 8) ||
-        (_sunBeamActive && _sunExposure >= 8 && temperatureC >= 36)) {
-      final dizzy = .5 + .5 * math.sin(_elapsed * 5);
-      for (var i = 0; i < 3; i++) {
-        final angle = _elapsed * 2 + i * math.pi * 2 / 3;
-        _rect(
-            canvas,
-            x + math.cos(angle) * unit * 8,
-            floor - unit * 29 + math.sin(angle) * unit * 2,
-            unit * dizzy,
-            unit * dizzy,
-            const ui.Color(0xFFFFF1A8));
-      }
-      for (var i = 0; i < 3; i++) {
-        final sx = x + unit * (i * 2 - 2);
-        final sy = floor - unit * (25 + ((_elapsed * 7 + i * 4) % 10));
-        canvas.drawCircle(ui.Offset(sx, sy), unit * 1.2,
-            ui.Paint()..color = const ui.Color(0x55FFF5DD));
-      }
-    }
-    if (hit) {
-      // Frazzled silhouette and soot pixels after a direct strike.
-      for (var i = 0; i < 5; i++) {
-        _rect(
-            canvas,
-            x + unit * (-5 + i * 2.2),
-            floor - unit * (27 + (i.isEven ? 2 : 0)),
-            unit * 1.5,
-            unit * 3,
-            const ui.Color(0xFF202126));
-      }
-      for (var i = 0; i < 7; i++) {
-        _rect(
-            canvas,
-            x + unit * (-6 + (i * 7 % 13)),
-            floor - unit * (12 + (i * 5 % 9)),
-            unit,
-            unit,
-            const ui.Color(0xFF202126));
-      }
-      // Smoke puffs rise briefly after impact.
-      for (var i = 0; i < 4; i++) {
-        final sy = floor - unit * (29 + ((_elapsed * 8 + i * 5) % 12));
-        canvas.drawCircle(
-            ui.Offset(x + unit * (i - 2) * 2, sy),
-            unit * (1.3 + i * .15),
-            ui.Paint()..color = const ui.Color(0x557C858B));
-      }
-    }
+    _drawGoblinEffects(canvas, w, h,
+        x: x,
+        floor: floor,
+        unit: unit,
+        hit: hit,
+        chatting: chatting,
+        sleeping: sleeping || resting,
+        yawning: yawning,
+        scratching: scratching,
+        nearMiss: nearMiss,
+        wipingBrow: wipingBrow,
+        paddling: paddling,
+        motionScale: motionScale);
   }
 
   void _drawLightning(ui.Canvas canvas, double w, double h) {
