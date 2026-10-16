@@ -1,0 +1,3468 @@
+import 'dart:math' as math;
+import 'dart:ui' as ui;
+
+import 'package:flame/game.dart';
+import 'package:flame/events.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
+import 'world_catalog.dart';
+import 'weather_rules.dart';
+import 'character_behavior.dart';
+
+enum SceneEnvironment { live, cyclone, flood, desertHeat, sandstorm }
+
+ui.Color weatherSceneSkyColor({
+  required bool isDay,
+  required bool sandstorm,
+  required bool storm,
+  required bool rain,
+  required bool fog,
+  required bool overcast,
+  required bool snowy,
+  required bool hot,
+  required bool spring,
+  required bool summer,
+  required double cloudCover,
+}) {
+  if (!isDay) {
+    if (sandstorm) return const ui.Color(0xFF322630);
+    if (storm || rain) return const ui.Color(0xFF111C30);
+    if (fog || overcast || cloudCover >= 72) {
+      return const ui.Color(0xFF20283C);
+    }
+    if (snowy) return const ui.Color(0xFF17243A);
+    return const ui.Color(0xFF101B35);
+  }
+  if (sandstorm) return const ui.Color(0xFFC67A43);
+  if (storm || rain) return const ui.Color(0xFF3A4C5B);
+  if (fog) return const ui.Color(0xFF849BA5);
+  if (overcast) return const ui.Color(0xFF89999E);
+  if (snowy) return const ui.Color(0xFFB8D1DC);
+  if (hot) return const ui.Color(0xFFF5A64C);
+  if (spring) return const ui.Color(0xFF86C9D3);
+  if (summer) return const ui.Color(0xFF65B9D8);
+  return const ui.Color(0xFF6EC7E8);
+}
+
+ui.Color weatherSceneGroundColor({
+  required bool isDay,
+  required bool arid,
+  required bool snow,
+  required bool rain,
+  required bool storm,
+  required bool autumn,
+  required bool spring,
+  required bool summer,
+  required bool winterSeason,
+}) {
+  if (!isDay) {
+    if (snow) return const ui.Color(0xFF354957);
+    if (arid) return const ui.Color(0xFF4A382F);
+    if (rain || storm) return const ui.Color(0xFF18343A);
+    if (autumn) return const ui.Color(0xFF3D3031);
+    return const ui.Color(0xFF1D3B35);
+  }
+  if (arid) return const ui.Color(0xFFC98542);
+  if (snow) return const ui.Color(0xFFDCEAF0);
+  if (autumn) return const ui.Color(0xFF856344);
+  if (spring) return const ui.Color(0xFF397452);
+  if (summer) return const ui.Color(0xFF3F7448);
+  if (winterSeason) return const ui.Color(0xFF625F59);
+  if (rain || storm) return const ui.Color(0xFF263D48);
+  return const ui.Color(0xFF315E4D);
+}
+
+enum _AmbientKind { bird, butterfly, frog, firefly, owl, cricket }
+
+class _AmbientCreature {
+  _AmbientCreature({
+    required this.kind,
+    required this.x,
+    required this.y,
+    required this.direction,
+    required this.spawnChance,
+    required this.minWait,
+    required this.waitRange,
+    required this.minDuration,
+    required this.durationRange,
+    required math.Random random,
+  }) : waitRemaining = random.nextDouble() * minWait;
+
+  final _AmbientKind kind;
+  final double x;
+  final double y;
+  final double direction;
+  final double spawnChance;
+  final double minWait;
+  final double waitRange;
+  final double minDuration;
+  final double durationRange;
+  double waitRemaining;
+  double age = 0;
+  double duration = 0;
+  bool visible = false;
+
+  void update(double dt, math.Random random) {
+    if (visible) {
+      age += dt;
+      if (age >= duration) visible = false;
+      return;
+    }
+    waitRemaining -= dt;
+    if (waitRemaining > 0) return;
+    if (random.nextDouble() < spawnChance) {
+      visible = true;
+      age = 0;
+      duration = minDuration + random.nextDouble() * durationRange;
+    }
+    waitRemaining = minWait + random.nextDouble() * waitRange;
+  }
+}
+
+class WeatherSceneConfig {
+  const WeatherSceneConfig({
+    required this.weatherCode,
+    required this.isDay,
+    required this.temperatureC,
+    required this.windKmh,
+    required this.location,
+    this.precipitationMm = 0,
+    this.month = 6,
+    this.latitude = 0,
+    this.longitude = 0,
+    this.city = '',
+    this.region = '',
+    this.cloudCover,
+    this.visibilityM,
+    this.windDirectionDeg = 0,
+    this.localHour,
+    this.profile = const CharacterProfile(),
+    this.previousWeatherKey = '',
+    this.environment = SceneEnvironment.live,
+    this.reduceFlashing = false,
+    this.reduceMotion = false,
+  });
+
+  final int weatherCode;
+  final bool isDay;
+  final double temperatureC;
+  final double windKmh;
+  final WorldLocation location;
+  final double precipitationMm;
+  final int month;
+  final double latitude;
+  final double longitude;
+  final String city;
+  final String region;
+  final double? cloudCover;
+  final double? visibilityM;
+  final double windDirectionDeg;
+  final int? localHour;
+  final CharacterProfile profile;
+  final String previousWeatherKey;
+  final SceneEnvironment environment;
+  final bool reduceFlashing;
+  final bool reduceMotion;
+}
+
+/// Holds one Flame game across ordinary Flutter rebuilds so character actions
+/// continue naturally while fresh weather data is applied.
+class WeatherSceneHost extends StatefulWidget {
+  const WeatherSceneHost({super.key, required this.config});
+
+  final WeatherSceneConfig config;
+
+  @override
+  State<WeatherSceneHost> createState() => _WeatherSceneHostState();
+}
+
+class _WeatherSceneHostState extends State<WeatherSceneHost> {
+  late final WeatherSceneGame _game = WeatherSceneGame(config: widget.config);
+
+  @override
+  void didUpdateWidget(covariant WeatherSceneHost oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _game.updateConfig(widget.config);
+  }
+
+  @override
+  Widget build(BuildContext context) => GameWidget(game: _game);
+}
+
+/// Fully procedural pixel-art weather world. No character or background image
+/// assets are required: every scene and the reactive goblin are drawn in Flame.
+class WeatherSceneGame extends FlameGame with TapCallbacks, LongPressCallbacks {
+  WeatherSceneGame({required this.config})
+      : _ambientRandom = math.Random(config.location.id.codeUnits
+            .fold<int>(17, (sum, value) => sum * 31 + value)) {
+    _configureAmbientLife();
+  }
+
+  WeatherSceneConfig config;
+  final math.Random _ambientRandom;
+  final List<_AmbientCreature> _ambientCreatures = [];
+  int get weatherCode => config.weatherCode;
+  bool get isDay => config.isDay;
+  double get temperatureC => config.temperatureC;
+  double get windKmh => config.windKmh;
+  double get precipitationMm => config.precipitationMm;
+  int get month => config.month;
+  double get latitude => config.latitude;
+  double get longitude => config.longitude;
+  String get city => config.city;
+  String get region => config.region;
+  double? get cloudCover => config.cloudCover;
+  double? get visibilityM => config.visibilityM;
+  double get windDirectionDeg => config.windDirectionDeg;
+  int? get localHour => config.localHour;
+  CharacterProfile get profile => config.profile;
+  String get previousWeatherKey => config.previousWeatherKey;
+  bool get reduceMotion => config.reduceMotion;
+  WorldLocation get location => config.location;
+  SceneEnvironment get environment => config.environment;
+  bool get reduceFlashing => config.reduceFlashing;
+
+  late WeatherConditions _conditions = WeatherConditions(
+    code: weatherCode,
+    temperatureC: temperatureC,
+    precipitationMm: precipitationMm,
+    windKmh: windKmh,
+    cloudCover: cloudCover,
+    visibilityM: visibilityM,
+  );
+
+  void updateConfig(WeatherSceneConfig next) {
+    final ambientContextChanged = next.location.id != config.location.id ||
+        next.weatherCode != config.weatherCode ||
+        next.isDay != config.isDay ||
+        next.temperatureC != config.temperatureC ||
+        next.windKmh != config.windKmh ||
+        next.precipitationMm != config.precipitationMm ||
+        next.cloudCover != config.cloudCover ||
+        next.visibilityM != config.visibilityM ||
+        next.month != config.month ||
+        next.environment != config.environment;
+    config = next;
+    _conditions = WeatherConditions(
+      code: next.weatherCode,
+      temperatureC: next.temperatureC,
+      precipitationMm: next.precipitationMm,
+      windKmh: next.windKmh,
+      cloudCover: next.cloudCover,
+      visibilityM: next.visibilityM,
+    );
+    _cachedBehaviorContext = null;
+    _behavior.temperament = next.profile.temperament;
+    if (ambientContextChanged) _configureAmbientLife();
+  }
+
+  double _elapsed = 0;
+  double _sunExposure = 0;
+  double _strikeAge = 99;
+  double _nextStrike = 7;
+  bool _directHit = false;
+  String? _dialogue;
+  double _dialogueAge = 0;
+  double _lastAmbientDialogueAt = -100;
+  int _lastQuipIndex = -1;
+  double _hitRecovery = 0;
+  final math.Random _random = math.Random();
+  late final CharacterBehaviorController _behavior =
+      CharacterBehaviorController(
+    temperament: profile.temperament,
+    previousWeatherKey: previousWeatherKey,
+    seed: location.id.codeUnits.fold(17, (sum, value) => sum * 31 + value),
+  );
+  int _lastBehaviorRevision = -1;
+  bool _longPressHandled = false;
+  CharacterSceneContext? _cachedBehaviorContext;
+  int? _cachedBehaviorHour;
+  final List<String> _recentDialogue = [];
+  double _boltStartX = 0;
+  double _boltTargetX = 0;
+  double _boltTargetY = 0;
+  ui.Color _boltColor = const ui.Color(0xFFF3FCFF);
+  final List<ui.Offset> _boltPoints = [];
+  final List<ui.Offset> _branchStarts = [];
+  final List<ui.Offset> _branchKnees = [];
+  final List<ui.Offset> _branchTips = [];
+
+  bool get _cyclone => environment == SceneEnvironment.cyclone;
+  bool get _flood => environment == SceneEnvironment.flood;
+  bool get _desertHeat =>
+      environment == SceneEnvironment.desertHeat ||
+      (_live &&
+          location.isArid &&
+          isDay &&
+          temperatureC >= strongHeatThresholdC &&
+          const [0, 1, 2].contains(weatherCode));
+  bool get _sandstorm =>
+      environment == SceneEnvironment.sandstorm ||
+      (_live &&
+          location.isArid &&
+          const [30, 31, 32, 33, 34, 35].contains(weatherCode));
+  bool get _live => environment == SceneEnvironment.live;
+  WorldSeason get _season {
+    return worldSeasonForMonth(month, latitude);
+  }
+
+  bool get _winterWorld => _live && _snow;
+  bool get _winterSeason =>
+      _live && location.seasonalFoliage && _season == WorldSeason.winter;
+  double get _environmentMotionScale => reduceMotion ? .32 : 1.0;
+  bool get _cold => _live && (_snow || temperatureC <= 12);
+  bool get _autumnWorld =>
+      _live && location.seasonalFoliage && _season == WorldSeason.autumn;
+  bool get _springWorld =>
+      _live && location.seasonalFoliage && _season == WorldSeason.spring;
+  bool get _summerWorld => _live && _season == WorldSeason.summer;
+
+  bool get _humidHabitat =>
+      location.biome == WorldBiome.tropical ||
+      location.biome == WorldBiome.coastal ||
+      location.biome == WorldBiome.river;
+
+  bool get _woodedHabitat =>
+      location.biome == WorldBiome.temperate ||
+      location.biome == WorldBiome.tropical ||
+      location.biome == WorldBiome.mountain;
+  double get _floodProgress =>
+      (_elapsed * (reduceMotion ? .65 : 1) / 25).clamp(0.0, 1.0);
+  double get _routePhase => _elapsed % 14;
+  bool get _walking {
+    if (_live) return _behavior.isWalking;
+    if (_cyclone || _sandstorm) return true;
+    if (_flood) return _elapsed < 4.5;
+    if (_desertHeat) return _elapsed < 4;
+    return _routePhase < 4 || (_routePhase >= 7 && _routePhase < 11);
+  }
+
+  bool get _walkingLeft => _live
+      ? _behavior.isWalking && _behavior.walkDirection < 0
+      : _desertHeat
+          ? false
+          : _sandstorm
+              ? math.sin(_elapsed * .35) < 0
+              : false;
+  double get _sceneX {
+    if (_cyclone) {
+      return .20 + .11 * (_wind / 160) + .02 * math.sin(_elapsed * 4);
+    }
+    if (_flood) return .52;
+    if (_sandstorm) return .34 + .06 * math.sin(_elapsed * .35);
+    if (_desertHeat) return _elapsed < 4 ? .32 + .17 * (_elapsed / 4) : .49;
+    if (_live) {
+      final walkScale = reduceFlashing || reduceMotion ? .5 : 1.0;
+      return (.5 + _behavior.walkAmount * walkScale).clamp(.32, .68).toDouble();
+    }
+    if (_rain && !_hot && !_winterWorld) {
+      return _routePhase < 4
+          ? .22 + .30 * (_routePhase / 4)
+          : _routePhase < 7
+              ? .52
+              : _routePhase < 11
+                  ? .52 - .30 * ((_routePhase - 7) / 4)
+                  : .22;
+    }
+    return _routePhase < 4
+        ? .18 + .34 * (_routePhase / 4)
+        : _routePhase < 7
+            ? .52
+            : _routePhase < 11
+                ? .52 - .34 * ((_routePhase - 7) / 4)
+                : .18;
+  }
+
+  double get _strideSpeed => _cyclone
+      ? 12
+      : _sandstorm
+          ? 10
+          : 7;
+  double get _wind => _cyclone
+      ? 60 + 100 * (_elapsed / 30).clamp(0.0, 1.0)
+      : environment == SceneEnvironment.sandstorm
+          ? 72
+          : environment == SceneEnvironment.flood
+              ? 34
+              : windKmh;
+  bool get _rainCode => _conditions.raining;
+  bool get _storm =>
+      _cyclone || _flood || (_live && const [95, 96, 99].contains(weatherCode));
+  bool get _thunderstorm => _live && _conditions.thunderstorm;
+  bool get _snow => _live && _conditions.snowing;
+  bool get _rain => _cyclone || _flood || _storm || (_live && _rainCode);
+  bool get _fog => _live && _conditions.foggy;
+  bool get _sunBeamActive =>
+      isDay &&
+      (_desertHeat ||
+          (_live &&
+              temperatureC >= strongHeatThresholdC &&
+              const [0, 1, 2].contains(weatherCode)));
+  double get _sunHeatProgress => _desertHeat
+      ? (_elapsed / 8).clamp(0.0, 1.0).toDouble()
+      : (_sunExposure /
+              8 *
+              ((temperatureC - strongHeatThresholdC) /
+                      (extremeHeatThresholdC - strongHeatThresholdC))
+                  .clamp(0.0, 1.0))
+          .clamp(0.0, 1.0)
+          .toDouble();
+  bool get _heatStress => _live && _conditions.strongHeat;
+  bool get _hot =>
+      _desertHeat ||
+      (_live && location.isArid && temperatureC >= strongHeatThresholdC);
+  bool get _windy => _wind >= windyThresholdKmh;
+  double get _cloudCoverage => _conditions.cloudPercent;
+  bool get _overcast => _conditions.overcast;
+  double get _rainIntensity => _conditions.rainIntensity;
+  bool get _lightRain => _live && _conditions.drizzle && !_thunderstorm;
+
+  ui.Color get _skyColor {
+    return weatherSceneSkyColor(
+      isDay: isDay,
+      sandstorm: _sandstorm,
+      storm: _storm || _cyclone || _flood,
+      rain: _rain,
+      fog: _fog,
+      overcast: _overcast,
+      snowy: _winterWorld,
+      hot: _hot,
+      spring: _springWorld,
+      summer: _summerWorld,
+      cloudCover: _cloudCoverage,
+    );
+  }
+
+  ui.Color get _groundColor => weatherSceneGroundColor(
+        isDay: isDay,
+        arid: location.isArid || _sandstorm,
+        snow: _winterWorld,
+        rain: _rain,
+        storm: _storm,
+        autumn: _autumnWorld,
+        spring: _springWorld,
+        summer: _summerWorld,
+        winterSeason: _winterSeason,
+      );
+
+  void _configureAmbientLife() {
+    _ambientCreatures.clear();
+    void add(
+      _AmbientKind kind, {
+      required int count,
+      required double yMin,
+      required double yRange,
+      required double spawnChance,
+      required double minWait,
+      required double waitRange,
+      required double minDuration,
+      required double durationRange,
+    }) {
+      for (var i = 0; i < count; i++) {
+        _ambientCreatures.add(_AmbientCreature(
+          kind: kind,
+          x: .08 + _ambientRandom.nextDouble() * .84,
+          y: yMin + _ambientRandom.nextDouble() * yRange,
+          direction: _ambientRandom.nextBool() ? 1 : -1,
+          spawnChance: spawnChance,
+          minWait: minWait,
+          waitRange: waitRange,
+          minDuration: minDuration,
+          durationRange: durationRange,
+          random: _ambientRandom,
+        ));
+      }
+    }
+
+    final clearEnough = !_thunderstorm && !_sandstorm && !_fog;
+    if (isDay && clearEnough && _wind < galeWindThresholdKmh) {
+      add(_AmbientKind.bird,
+          count: 2,
+          yMin: .12,
+          yRange: .19,
+          spawnChance: .72,
+          minWait: 15,
+          waitRange: 19,
+          minDuration: 5,
+          durationRange: 5);
+    }
+    if (isDay &&
+        _springWorld &&
+        clearEnough &&
+        _wind < strongWindThresholdKmh) {
+      add(_AmbientKind.butterfly,
+          count: 2,
+          yMin: .48,
+          yRange: .30,
+          spawnChance: .68,
+          minWait: 12,
+          waitRange: 16,
+          minDuration: 3,
+          durationRange: 4);
+    }
+    if ((_humidHabitat || _woodedHabitat) &&
+        _hasWater &&
+        (_rain || !_winterWorld)) {
+      add(_AmbientKind.frog,
+          count: 2,
+          yMin: .78,
+          yRange: .10,
+          spawnChance: .64,
+          minWait: 10,
+          waitRange: 15,
+          minDuration: 2,
+          durationRange: 2.5);
+    }
+    if (!isDay && clearEnough && (_humidHabitat || _woodedHabitat)) {
+      add(_AmbientKind.firefly,
+          count: 4,
+          yMin: .42,
+          yRange: .38,
+          spawnChance: .78,
+          minWait: 3,
+          waitRange: 8,
+          minDuration: 2,
+          durationRange: 4);
+    }
+    if (!isDay && clearEnough && _woodedHabitat && !_rain) {
+      add(_AmbientKind.owl,
+          count: 1,
+          yMin: .20,
+          yRange: .16,
+          spawnChance: .42,
+          minWait: 24,
+          waitRange: 30,
+          minDuration: 5,
+          durationRange: 4);
+    }
+    if (!isDay && location.biome != WorldBiome.urban && !_sandstorm) {
+      add(_AmbientKind.cricket,
+          count: 2,
+          yMin: .84,
+          yRange: .10,
+          spawnChance: .48,
+          minWait: 16,
+          waitRange: 24,
+          minDuration: 2,
+          durationRange: 3);
+    }
+  }
+
+  bool get _hasWater =>
+      location.biome == WorldBiome.coastal ||
+      location.biome == WorldBiome.river ||
+      _conditions.raining ||
+      precipitationMm > 0;
+
+  String get _behaviorWeatherKey {
+    if (_conditions.thunderstorm) return 'storm';
+    if (_conditions.snowing) return 'snow';
+    if (_conditions.raining) {
+      return _rainIntensity >= .65 ? 'heavy rain' : 'drizzle';
+    }
+    if (_conditions.dusty || _sandstorm) return 'sand';
+    if (temperatureC >= strongHeatThresholdC && isDay) return 'heat';
+    if (_conditions.foggy) return 'fog';
+    if (temperatureC <= 5) return 'cold';
+    if (windKmh >= windyThresholdKmh) return 'wind';
+    return 'clear';
+  }
+
+  CharacterSceneContext get _characterContext {
+    final hour = localHour == null
+        ? null
+        : (localHour! + (_elapsed / 3600).floor()) % 24;
+    if (_cachedBehaviorContext != null && _cachedBehaviorHour == hour) {
+      return _cachedBehaviorContext!;
+    }
+    _cachedBehaviorHour = hour;
+    return _cachedBehaviorContext = CharacterSceneContext(
+      weatherKey: _behaviorWeatherKey,
+      night: hour != null ? hour >= 21 || hour < 5 : !isDay,
+      morning: hour != null ? hour >= 5 && hour <= 10 : false,
+      hasLandmark: location.landmark != WorldLandmark.none,
+      hasWater: location.biome == WorldBiome.coastal ||
+          location.biome == WorldBiome.river ||
+          (_rain && precipitationMm > 0),
+      hasFlowers: _springWorld,
+      hasLeaves: _autumnWorld,
+      hasClouds: !_hot && !_sandstorm && _cloudCoverage >= 20,
+      criticalWeather: _thunderstorm ||
+          windKmh >= galeWindThresholdKmh ||
+          (temperatureC >= extremeHeatThresholdC && isDay) ||
+          (_conditions.raining && _rainIntensity >= .82),
+      reducedMotion: reduceMotion,
+    );
+  }
+
+  @override
+  void onTapDown(TapDownEvent event) {
+    // Wait for tap-up so a long press is not also treated as a normal tap.
+  }
+
+  @override
+  void onTapUp(TapUpEvent event) {
+    if (_longPressHandled) {
+      _longPressHandled = false;
+      return;
+    }
+    _handleCharacterTouch(event.canvasPosition.x, event.canvasPosition.y,
+        longPress: false);
+  }
+
+  @override
+  void onTapCancel(TapCancelEvent event) {
+    _longPressHandled = false;
+  }
+
+  @override
+  void onLongPressStart(LongPressStartEvent event) {
+    super.onLongPressStart(event);
+    _longPressHandled = true;
+    _handleCharacterTouch(event.canvasPosition.x, event.canvasPosition.y,
+        longPress: true);
+  }
+
+  void _handleCharacterTouch(double tapX, double tapY,
+      {required bool longPress}) {
+    final w = size.x;
+    final h = size.y;
+    if (w <= 0 || h <= 0) return;
+
+    final unit = math.max(2.0, math.min(w, h) * .014).toDouble();
+    final goblinX = w * _sceneX;
+    final goblinFloor = _sceneFloor(h);
+    final inGoblinBounds = (tapX - goblinX).abs() <= unit * 8 &&
+        tapY >= goblinFloor - unit * 30 &&
+        tapY <= goblinFloor + unit * 2;
+
+    if (inGoblinBounds) {
+      if (_behavior.interact(
+          longPress: longPress, context: _characterContext)) {
+        _tellWeatherQuip(longPress: longPress);
+      }
+    }
+  }
+
+  double _sceneFloor(double h) {
+    final floodProgress = _floodProgress;
+    return _flood
+        ? h * math.min(.82, .88 - .38 * floodProgress)
+        : h * ((_rain && !_hot && !_winterWorld && !_sandstorm) ? .82 : .87);
+  }
+
+  void _tellWeatherQuip({bool longPress = false}) {
+    if (longPress) {
+      _say('A long press! I thought we were having a staring contest.');
+      return;
+    }
+    final quips = _cyclone
+        ? const [
+            'Forecast: gusts to 160. My scarf has resigned.',
+            'I asked the wind to chill. It took that literally.',
+            'My hat is now somewhere in next week’s forecast.',
+          ]
+        : _flood
+            ? const [
+                'This raft is great. The water level keeps raising the stakes.',
+                'I wanted a waterfront home. The water misunderstood.',
+                'My boots are now tiny indoor swimming pools.',
+              ]
+            : _desertHeat
+                ? const [
+                    'I am not blushing. The sun is just very persuasive.',
+                    'My shade is smaller than my to-do list.',
+                    'I brought water. The desert asked for the whole bottle.',
+                  ]
+                : _sandstorm
+                    ? const [
+                        'I packed a sand-wich. The storm packed the rest.',
+                        'My goggles are clear. The view has other plans.',
+                        'I can see the dune. I think it moved.',
+                      ]
+                    : _storm
+                        ? const [
+                            'I asked the thunder for a quiet night. It said “no”.',
+                            'That lightning was a bright idea. Not mine.',
+                            'The forecast says “chance of a dramatic entrance”.',
+                          ]
+                        : _snow || temperatureC <= 12
+                            ? const [
+                                'I tried to catch a snowflake. Now I have a cold hand.',
+                                'My breath is making tiny clouds. I should charge rent.',
+                                'I wore two mittens. My nose is still jealous.',
+                              ]
+                            : _rain
+                                ? const [
+                                    'Puddles are just tiny sky mirrors with commitment issues.',
+                                    'I stepped in a puddle. It stepped in both boots.',
+                                    'Rain check? I think the sky already cashed it.',
+                                  ]
+                                : _fog
+                                    ? const [
+                                        'I can’t see the forecast, but it says “you are here”.',
+                                        'I followed my lantern. Good news: I found me.',
+                                        'The fog said hello. I think. We should meet again.',
+                                      ]
+                                    : _windy
+                                        ? const [
+                                            'Wind check: my scarf is flying first class.',
+                                            'I leaned into the wind. It leaned back.',
+                                            'My hat just became a weather balloon.',
+                                          ]
+                                        : _hot
+                                            ? const [
+                                                'I am making my own humidity.',
+                                                'The sun and I have a very warm relationship.',
+                                                'If I stand still, do I count as shade?',
+                                              ]
+                                            : _springWorld
+                                                ? const [
+                                                    'Pollen forecast: my sneeze arrives right on time.',
+                                                    'I stopped to smell the flowers. They tickled back.',
+                                                    'Spring has sprung. I am still looking for my hat.',
+                                                  ]
+                                                : _autumnWorld
+                                                    ? const [
+                                                        'I am leaf-ing this forecast to the experts.',
+                                                        'A leaf landed on my hood. New seasonal outfit!',
+                                                        'The trees are shedding. I should try that with chores.',
+                                                      ]
+                                                    : const [
+                                                        'The sky is clear. My thoughts are partly cloudy.',
+                                                        'Forecast says sunny. I brought my best squint.',
+                                                        'Lovely weather. I planned this outfit by accident.',
+                                                      ];
+    final options = <int>[
+      for (var i = 0; i < quips.length; i++)
+        if (i != _lastQuipIndex) i,
+    ];
+    final next = options[_random.nextInt(options.length)];
+    _lastQuipIndex = next;
+    _say(quips[next]);
+  }
+
+  void _say(String line, {double seconds = 4.2}) {
+    if (_recentDialogue.contains(line) && _recentDialogue.isNotEmpty) {
+      line = _recentDialogue.first;
+    }
+    _recentDialogue
+      ..remove(line)
+      ..insert(0, line);
+    if (_recentDialogue.length > 5) _recentDialogue.removeLast();
+    _dialogue = line;
+    _dialogueAge = seconds;
+  }
+
+  void _triggerStrike({required bool directHit}) {
+    _strikeAge = 0;
+    _directHit = directHit;
+    _hitRecovery = directHit ? 1.35 : 0.55;
+    _behavior.surprise(directHit: directHit);
+    _prepareLightning(directHit);
+    if (directHit && !reduceFlashing) {
+      HapticFeedback.heavyImpact();
+    }
+  }
+
+  void _prepareLightning(bool directHit) {
+    final w = size.x;
+    final h = size.y;
+    if (w <= 0 || h <= 0) return;
+
+    final goblinX = w * _sceneX;
+    _boltTargetX = directHit
+        ? (goblinX + (_random.nextDouble() - .5) * w * .12)
+            .clamp(w * .05, w * .95)
+            .toDouble()
+        : w * (.18 + _random.nextDouble() * .64);
+    _boltTargetY = directHit
+        ? h * (.49 + _random.nextDouble() * .08)
+        : h * (.62 + _random.nextDouble() * .28);
+    _boltStartX = (_boltTargetX + (_random.nextDouble() - .5) * w * .42)
+        .clamp(w * .04, w * .96)
+        .toDouble();
+    _boltColor = [
+      const ui.Color(0xFFF3FCFF),
+      const ui.Color(0xFFDDF5FF),
+      const ui.Color(0xFFE9E2FF),
+    ][_random.nextInt(3)];
+
+    _boltPoints.clear();
+    _branchStarts.clear();
+    _branchKnees.clear();
+    _branchTips.clear();
+    const segments = 7;
+    for (var i = 1; i <= segments; i++) {
+      final t = i / segments;
+      final centerX = ui.lerpDouble(_boltStartX, _boltTargetX, t)!;
+      final jitter = (_random.nextDouble() - .5) * w * .13 * (1 - t);
+      _boltPoints.add(ui.Offset(centerX + jitter, _boltTargetY * t));
+    }
+    for (var i = 0; i < 3; i++) {
+      final from = _boltPoints[1 + _random.nextInt(_boltPoints.length - 2)];
+      final direction = _random.nextBool() ? 1.0 : -1.0;
+      _branchStarts.add(from);
+      _branchKnees.add(ui.Offset(
+        (from.dx + direction * w * (.025 + _random.nextDouble() * .035))
+            .clamp(w * .02, w * .98)
+            .toDouble(),
+        from.dy + h * (.025 + _random.nextDouble() * .035),
+      ));
+      final knee = _branchKnees.last;
+      _branchTips.add(ui.Offset(
+        (knee.dx + direction * w * (.018 + _random.nextDouble() * .028))
+            .clamp(w * .02, w * .98)
+            .toDouble(),
+        knee.dy + h * (.015 + _random.nextDouble() * .03),
+      ));
+    }
+  }
+
+  @override
+  void update(double dt) {
+    super.update(dt);
+    _elapsed += dt;
+    _behavior.update(dt, _characterContext);
+    for (final creature in _ambientCreatures) {
+      creature.update(dt, _ambientRandom);
+    }
+    if (_behavior.revision != _lastBehaviorRevision) {
+      _lastBehaviorRevision = _behavior.revision;
+      _speakForBehavior();
+    }
+    _strikeAge += dt;
+    _hitRecovery = math.max(0.0, _hitRecovery - dt);
+    _sunExposure = _sunBeamActive
+        ? _sunExposure + dt
+        : math.max(0.0, _sunExposure - dt * 2);
+    _dialogueAge = math.max(0.0, _dialogueAge - dt);
+    if (_dialogueAge == 0) _dialogue = null;
+    if (_thunderstorm && _strikeAge >= _nextStrike) {
+      _triggerStrike(directHit: _random.nextDouble() < .28);
+      _nextStrike = 6 + _random.nextDouble() * 9;
+    }
+  }
+
+  void _speakForBehavior() {
+    if (_dialogueAge > 1.2) return;
+    final isWeatherReaction =
+        _behavior.state == GoblinBehaviorState.weatherReact;
+    final dialogueCooldown = isWeatherReaction ? 12.0 : 28.0;
+    if (_elapsed - _lastAmbientDialogueAt < dialogueCooldown) return;
+    final target = _behavior.actionTarget;
+    switch (_behavior.state) {
+      case GoblinBehaviorState.weatherReact:
+        final line = switch (target) {
+          'storm' => _unusedLine(profile.temperament.caution > .62
+              ? [
+                  'That thunder arrived with absolutely no manners.',
+                  'I am calm. My ears are simply standing up.',
+                  'I shall wait here until the sky stops shouting.',
+                ]
+              : [
+                  'That thunder arrived with absolutely no manners.',
+                  'Was that thunder or the sky dropping its lunch?',
+                  'The sky has a very loud opinion today.',
+                ]),
+          'heavy rain' => _unusedLine([
+              'Shelter plan: hood first, dignity later.',
+              'I am trusting this hood with my entire afternoon.',
+              'The puddles are growing faster than my confidence.',
+            ]),
+          'drizzle' => _unusedLine([
+              'A little rain. I shall inspect each drop personally.',
+              'The rain is being polite. I shall be polite back.',
+              'Tiny drops, enormous commitment.',
+            ]),
+          'snow' => _unusedLine([
+              'Snow! I am accepting tiny cold visitors.',
+              'I caught a snowflake. It vanished. Very suspicious.',
+              'A snowflake landed on me. I shall call it a hat.',
+            ]),
+          'wind' || 'sand' => _unusedLine([
+              'I am leaning. The wind is still winning.',
+              'My scarf is trying to explore without me.',
+              'I planted my feet. The wind read the instructions too.',
+            ]),
+          'heat' => _unusedLine([
+              'I am moving to the nearest patch of shade.',
+              'If I stand very still, I can become my own shade.',
+              'The sun is cooking me at a very personal pace.',
+            ]),
+          'fog' => _unusedLine([
+              'I can see the path. The path is being shy.',
+              'I am sure the horizon is around here somewhere.',
+              'The fog made the world smaller. Convenient, I suppose.',
+            ]),
+          'cold' => _unusedLine([
+              'I have become a very small bundle of scarf.',
+              'My ears have requested a warmer forecast.',
+              'I am keeping my hands in my sleeves until spring.',
+            ]),
+          _ => 'The weather changed. I should take a look.',
+        };
+        _sayAmbient(line, seconds: 3.8);
+      case GoblinBehaviorState.landmarkReact:
+        _sayAmbient('The ${_landmarkTitle()} deserves a closer look.',
+            seconds: 3.8);
+      case GoblinBehaviorState.inspect:
+        final line = switch (target) {
+          'landmark' =>
+            'I wonder how long the ${_landmarkTitle()} has watched this weather.',
+          'puddle' => 'A puddle! It is almost as reflective as I am.',
+          'flowers' => 'These flowers smell like excellent weather.',
+          'falling leaf' => 'That leaf is taking the scenic route.',
+          'clouds' => 'I think that cloud looks a bit like a goblin.',
+          _ => 'What have we got here?',
+        };
+        _sayAmbient(line, seconds: 3.5);
+      case GoblinBehaviorState.play:
+        final line = switch (target) {
+          'puddle' => 'Puddle hop! My boots regret nothing.',
+          'falling leaf' => 'I nearly caught it. The leaf has escape plans.',
+          'flowers' => 'I am not dancing. The flowers started it.',
+          _ => 'A tiny victory dance for the weather.',
+        };
+        _sayAmbient(line, seconds: 3.6);
+      case GoblinBehaviorState.sleep:
+        _sayAmbient('Just resting my eyes. Very weather-aware of me.',
+            seconds: 2.2);
+      case GoblinBehaviorState.yawn:
+        _sayAmbient(
+            'The forecast is fascinating. I may have blinked for a minute.',
+            seconds: 3.2);
+      case GoblinBehaviorState.lookAround when target == 'scratch':
+        _sayAmbient('I had a thought. It wandered off.', seconds: 2.8);
+      case GoblinBehaviorState.lookAround when target == 'clearing sky':
+        _sayAmbient('The sky is clearing. Back to my important wandering.',
+            seconds: 3.5);
+      default:
+        break;
+    }
+  }
+
+  void _sayAmbient(String line, {required double seconds}) {
+    _say(line, seconds: seconds);
+    _lastAmbientDialogueAt = _elapsed;
+  }
+
+  String _unusedLine(List<String> options) {
+    final fresh =
+        options.where((line) => !_recentDialogue.contains(line)).toList();
+    final pool = fresh.isEmpty ? options : fresh;
+    return pool[_random.nextInt(pool.length)];
+  }
+
+  String _landmarkTitle() {
+    final words = location.landmark.name
+        .replaceAllMapped(
+            RegExp(r'([a-z])([A-Z])'), (match) => '${match[1]} ${match[2]}')
+        .replaceAll('_', ' ');
+    if (words.isEmpty) return location.name;
+    return '${words[0].toUpperCase()}${words.substring(1)}';
+  }
+
+  @override
+  void render(ui.Canvas canvas) {
+    super.render(canvas);
+    final w = size.x;
+    final h = size.y;
+    if (w <= 0 || h <= 0) return;
+
+    _rect(canvas, 0, 0, w, h, _skyColor);
+
+    final hour = localHour;
+    if (isDay &&
+        hour != null &&
+        ((hour >= 5 && hour <= 8) || (hour >= 17 && hour <= 20))) {
+      final sunrise = hour <= 8;
+      final tint =
+          sunrise ? const ui.Color(0x24FFB37B) : const ui.Color(0x2AFF855E);
+      canvas.drawRect(
+        ui.Rect.fromLTWH(0, h * .30, w, h * .42),
+        ui.Paint()
+          ..shader = ui.Gradient.linear(
+            ui.Offset(0, h * .30),
+            ui.Offset(0, h * .72),
+            [tint, const ui.Color(0x00FFB37B)],
+          ),
+      );
+    }
+
+    _drawSkyDetails(canvas, w, h);
+
+    if (_desertHeat && isDay) {
+      final pulse = .94 + .06 * math.sin(_elapsed * 2.4);
+      final center = ui.Offset(w * .79, h * .15);
+      canvas.drawCircle(center, w * .17 * pulse,
+          ui.Paint()..color = const ui.Color(0x33FFF0A0));
+      canvas.drawCircle(center, w * .12 * pulse,
+          ui.Paint()..color = const ui.Color(0xFFFFD653));
+    } else if (isDay &&
+        !_storm &&
+        !_rain &&
+        !_fog &&
+        const [0, 1, 2].contains(weatherCode)) {
+      final sun = _winterWorld
+          ? const ui.Color(0xFFE5E8D8)
+          : const ui.Color(0xFFFFF0A6);
+      final sunSize = _winterWorld ? .07 : .10;
+      _rect(canvas, w * .80, h * .14, w * sunSize, h * sunSize, sun);
+      _rect(
+          canvas, w * .82, h * .12, w * sunSize * .60, h * sunSize * 1.35, sun);
+    } else if (!isDay &&
+        !_storm &&
+        !_rain &&
+        !_fog &&
+        !_sandstorm &&
+        !_cyclone &&
+        !_flood &&
+        _cloudCoverage < 68) {
+      _rect(canvas, w * .78, h * .10, w * .075, h * .075,
+          const ui.Color(0xFFDDEBFF));
+      _rect(canvas, w * .80, h * .085, w * .055, h * .075, _skyColor);
+    }
+
+    if (!_desertHeat && !_sandstorm) {
+      final cloudTone = !isDay
+          ? (_storm || _rain
+              ? const ui.Color(0xFF26334A)
+              : const ui.Color(0xFF485369))
+          : _storm
+              ? const ui.Color(0xFF26364E)
+              : _overcast
+                  ? const ui.Color(0xFF7B8990)
+                  : _winterWorld
+                      ? const ui.Color(0xFFD3E0E4)
+                      : const ui.Color(0xFFD7EDF1);
+      final cloudCount = (_cloudCoverage / 25).ceil().clamp(1, 4);
+      for (var i = 0; i < cloudCount; i++) {
+        final cloudWidth = w * (.19 + (i % 2) * .045);
+        final direction = math.sin(windDirectionDeg * math.pi / 180);
+        final drift = _elapsed *
+            _environmentMotionScale *
+            (4 + i * 1.8) *
+            (direction >= 0 ? 1 : -1);
+        final x =
+            ((w * (.06 + i * .25) + drift) % (w + cloudWidth)) - cloudWidth;
+        final y = h * (.13 + (i % 3) * .055);
+        _cloud(canvas, x, y, cloudWidth, cloudTone);
+      }
+    }
+
+    _rect(canvas, 0, h * .57, w, h * .43, _groundColor);
+    final groundEdge = !isDay
+        ? (_winterWorld
+            ? const ui.Color(0xFF718995)
+            : location.isArid || _sandstorm
+                ? const ui.Color(0xFF72513E)
+                : const ui.Color(0xFF294A40))
+        : (location.isArid || _sandstorm)
+            ? const ui.Color(0xFFE9B65E)
+            : _winterWorld
+                ? const ui.Color(0xFFF2F6F1)
+                : _autumnWorld
+                    ? const ui.Color(0xFFAD8150)
+                    : _winterSeason
+                        ? const ui.Color(0xFF8B8172)
+                        : const ui.Color(0xFF47765A);
+    _rect(canvas, 0, h * .56, w, h * .035, groundEdge);
+    _drawHorizon(canvas, w, h);
+
+    if (location.isArid || _sandstorm) {
+      // Low dunes make arid terrain read as desert without inventing a landmark.
+      final duneLip = ui.Path()
+        ..moveTo(0, h * .76)
+        ..quadraticBezierTo(w * .25, h * .69, w * .48, h * .75)
+        ..quadraticBezierTo(w * .73, h * .80, w, h * .70)
+        ..lineTo(w, h)
+        ..lineTo(0, h)
+        ..close();
+      canvas.drawPath(duneLip, ui.Paint()..color = const ui.Color(0xFFD99A54));
+      for (var i = 0; i < 4; i++) {
+        final tx = w * (.31 + i * .025);
+        final ty = h * (.80 + (i % 2) * .025);
+        _rect(canvas, tx, ty, w * .012, h * .008, const ui.Color(0xFF98613D));
+        _rect(canvas, tx + w * .013, ty + h * .008, w * .012, h * .008,
+            const ui.Color(0xFF98613D));
+      }
+    } else if (location.biome == WorldBiome.temperate ||
+        location.biome == WorldBiome.tropical) {
+      for (var i = 0; i < 8; i++) {
+        final x = w * (i / 8) + (i.isEven ? 0 : w * .035);
+        final tree = _winterWorld
+            ? const ui.Color(0xFF547F91)
+            : _autumnWorld
+                ? const ui.Color(0xFF9A5735)
+                : _springWorld
+                    ? const ui.Color(0xFF286F4E)
+                    : _summerWorld
+                        ? const ui.Color(0xFF245B3F)
+                        : _winterSeason
+                            ? const ui.Color(0xFF53615D)
+                            : _storm
+                                ? const ui.Color(0xFF172F3A)
+                                : const ui.Color(0xFF214D42);
+        final sway = _windy
+            ? math.sin(_elapsed * _environmentMotionScale * 3 +
+                    i +
+                    windDirectionDeg / 90) *
+                w *
+                (.006 + (_wind / 160).clamp(0.0, .06))
+            : 0.0;
+        _drawPixelTree(
+            canvas,
+            x + w * .06 + sway,
+            h * .61,
+            w * (.14 + (i % 3) * .012),
+            h * (.23 + (i % 4) * .025),
+            tree,
+            _winterWorld);
+      }
+    }
+
+    _drawTerrainDetails(canvas, w, h);
+    if (_cold && !_snow && !_rain) _drawFrostDetails(canvas, w, h);
+    _drawCatalogLandmark(canvas, w, h);
+    if (_rain) _drawWetGround(canvas, w, h);
+
+    if (_cyclone) {
+      _drawCyclone(canvas, w, h);
+    } else if (_flood) {
+      _drawFlood(canvas, w, h);
+    } else if (_sandstorm) {
+      _drawSandstorm(canvas, w, h);
+    } else if (_rain &&
+        !_hot &&
+        !_winterWorld &&
+        location.landmark == WorldLandmark.none &&
+        location.biome == WorldBiome.temperate) {
+      _drawRainyForest(canvas, w, h);
+    }
+
+    if (!isDay) {
+      // Dim terrain and landmarks together while leaving the night sky visible.
+      canvas.drawRect(
+        ui.Rect.fromLTWH(0, h * .42, w, h * .58),
+        ui.Paint()..color = const ui.Color(0x33202C4D),
+      );
+      _drawNightLights(canvas, w, h);
+    }
+    _drawAmbientLife(canvas, w, h);
+
+    _drawWeatherParticles(canvas, w, h);
+    if (_live) _drawSeasonParticles(canvas, w, h);
+    final floodProgress = _floodProgress;
+    final x = w * _sceneX;
+    final floor = _sceneFloor(h);
+    _drawSunBeam(canvas, w, h, x, floor);
+    final windAngle = math.cos(windDirectionDeg * math.pi / 180).sign;
+    final lean = _cyclone
+        ? .10 + .16 * (_wind / 160)
+        : _sandstorm
+            ? .22 * (windAngle == 0 ? 1 : windAngle)
+            : _windy
+                ? math.min(_wind / 160, .11) * (windAngle == 0 ? 1 : windAngle)
+                : 0.0;
+    canvas.save();
+    canvas.translate(x, floor);
+    final characterUnit = math.max(2.0, math.min(w, h) * .014).toDouble();
+    if (_behavior.state == GoblinBehaviorState.play &&
+        !reduceFlashing &&
+        !reduceMotion) {
+      canvas.translate(0,
+          -math.sin(_behavior.actionProgress * math.pi) * characterUnit * 1.2);
+    }
+    canvas.rotate(lean);
+    if (_walkingLeft) canvas.scale(-1, 1);
+    _drawGoblin(canvas, w, h, x: 0, floor: 0);
+    canvas.restore();
+    if (_flood) _drawFloodAlert(canvas, w, h, floor, floodProgress);
+    _drawLightning(canvas, w, h);
+    // Short recovery vignette after a hit; no repeated strobing.
+    if (_hitRecovery > 0 && _directHit) {
+      final a = (_hitRecovery / 1.35 * 22).round().clamp(0, 22).toInt();
+      canvas.drawRect(ui.Rect.fromLTWH(0, 0, w, h),
+          ui.Paint()..color = ui.Color.fromARGB(a, 18, 22, 28));
+    }
+
+    if (_fog) {
+      final visibility = visibilityM ?? 700;
+      final alpha = (18 + (1800 - visibility).clamp(0, 1500) / 50)
+          .round()
+          .clamp(18, 48)
+          .toInt();
+      final mist = ui.Color.fromARGB(alpha, 179, 202, 207);
+      _rect(canvas, 0, h * .24, w, h * .10, mist.withOpacity(.28));
+      _rect(canvas, 0, h * .50, w, h * .10, mist.withOpacity(.42));
+      _rect(canvas, 0, h * .76, w, h * .07, mist.withOpacity(.34));
+    }
+    _drawSpeechBubble(canvas, w, h);
+    // A small pixel prompt makes the scene discoverable and testable.
+    if (_thunderstorm) {
+      _rect(canvas, w * .34, h * .91, w * .43, h * .045,
+          const ui.Color(0xAA0A1B2B));
+      final promptPaint = ui.Paint()..color = const ui.Color(0xFFEAF7FF);
+      // Tiny pixel glyph-like marks instead of a font dependency inside Flame.
+      for (var i = 0; i < 10; i++) {
+        _rect(canvas, w * .385 + i * w * .018, h * .925, w * .009, h * .012,
+            i == 0 ? const ui.Color(0xFFFFC857) : promptPaint.color);
+      }
+    }
+  }
+
+  void _drawNightLights(ui.Canvas canvas, double w, double h) {
+    if (isDay) return;
+    final settlement = location.biome == WorldBiome.urban ||
+        location.biome == WorldBiome.temperate ||
+        location.biome == WorldBiome.tropical ||
+        location.biome == WorldBiome.river ||
+        location.biome == WorldBiome.coastal ||
+        location.biome == WorldBiome.mountain ||
+        location.landmark == WorldLandmark.jaisalmerFort;
+    if (!settlement) return;
+    final lamp = ui.Paint()..color = const ui.Color(0xFFFFCF75);
+    final glow = ui.Paint()..color = const ui.Color(0x55FFB94D);
+    for (var i = 0; i < 3; i++) {
+      final x = w * (.14 + i * .34);
+      final y = h * (.51 + (i.isOdd ? .035 : 0));
+      canvas.drawCircle(ui.Offset(x, y), math.max(2.0, w * .012), glow);
+      _rect(canvas, x - w * .006, y - h * .006, w * .012, h * .014, lamp.color);
+    }
+  }
+
+  void _drawAmbientLife(ui.Canvas canvas, double w, double h) {
+    if (_ambientCreatures.isEmpty) return;
+    final unit = math.max(2.0, math.min(w, h) * .009).toDouble();
+    final motion = reduceMotion ? 0.0 : 1.0;
+    for (final creature in _ambientCreatures) {
+      if (!creature.visible) continue;
+      final age = creature.age;
+      final progress = (age / creature.duration).clamp(0.0, 1.0);
+      final travel = creature.kind == _AmbientKind.bird ||
+              creature.kind == _AmbientKind.owl
+          ? creature.direction * progress * .30 * motion
+          : math.sin(
+                  age * (creature.kind == _AmbientKind.butterfly ? 2.1 : 1.3)) *
+              .025 *
+              motion;
+      final x = (creature.x + travel) % 1.0 * w;
+      final bob = math.sin(age * 4.2) * .012 * motion;
+      final y = h * (creature.y + bob);
+      switch (creature.kind) {
+        case _AmbientKind.bird:
+          final wing = motion == 0 ? 0.0 : math.sin(age * 9) * unit;
+          final paint = ui.Paint()
+            ..color = const ui.Color(0xFF263C4C)
+            ..strokeWidth = math.max(1.2, unit * .38)
+            ..strokeCap = ui.StrokeCap.square;
+          canvas.drawLine(
+              ui.Offset(x - unit * 1.8, y + wing), ui.Offset(x, y), paint);
+          canvas.drawLine(
+              ui.Offset(x, y), ui.Offset(x + unit * 1.8, y - wing), paint);
+        case _AmbientKind.butterfly:
+          final flutter =
+              motion == 0 ? .8 : .45 + .35 * math.sin(age * 8).abs();
+          final wing = ui.Paint()
+            ..color = const ui.Color(0xFFE9A6D2).withValues(alpha: flutter);
+          canvas.drawCircle(ui.Offset(x - unit, y), unit * .8, wing);
+          canvas.drawCircle(ui.Offset(x + unit, y), unit * .8, wing);
+          _rect(canvas, x - unit * .18, y - unit * .5, unit * .36, unit,
+              const ui.Color(0xFF594857));
+        case _AmbientKind.frog:
+          final hop =
+              motion == 0 ? 0.0 : math.sin(age * 3.6).abs() * unit * 1.6;
+          final frogY = y - hop;
+          _rect(canvas, x - unit * 1.5, frogY, unit * 3, unit * 1.7,
+              const ui.Color(0xFF5A9B55));
+          _rect(canvas, x - unit, frogY - unit * .7, unit * .7, unit * .7,
+              const ui.Color(0xFFE6E78B));
+          _rect(canvas, x + unit * .3, frogY - unit * .7, unit * .7, unit * .7,
+              const ui.Color(0xFFE6E78B));
+          _rect(canvas, x - unit * 1.4, frogY + unit * 1.3, unit, unit * .5,
+              const ui.Color(0xFF3E7045));
+          _rect(canvas, x + unit * .5, frogY + unit * 1.3, unit, unit * .5,
+              const ui.Color(0xFF3E7045));
+        case _AmbientKind.firefly:
+          final pulse = reduceFlashing
+              ? .55
+              : .35 + .35 * (.5 + .5 * math.sin(age * 2.2));
+          final radius = unit * (1.1 + pulse);
+          canvas.drawCircle(
+              ui.Offset(x, y),
+              radius * 2.0,
+              ui.Paint()
+                ..color = const ui.Color(0x40FFE58A).withValues(alpha: pulse));
+          _rect(canvas, x - unit * .3, y - unit * .3, unit * .6, unit * .6,
+              const ui.Color(0xFFFFE58A));
+        case _AmbientKind.owl:
+          final owl = const ui.Color(0xFF29323C);
+          _rect(canvas, x - unit * 1.5, y, unit * 3, unit * 2.2, owl);
+          _rect(canvas, x - unit, y - unit * .6, unit, unit, owl);
+          _rect(canvas, x + unit * .2, y - unit * .6, unit, unit, owl);
+          _rect(canvas, x - unit * .8, y + unit * .5, unit * .5, unit * .5,
+              const ui.Color(0xFFFFDA82));
+          _rect(canvas, x + unit * .3, y + unit * .5, unit * .5, unit * .5,
+              const ui.Color(0xFFFFDA82));
+        case _AmbientKind.cricket:
+          final cricket = ui.Paint()
+            ..color = const ui.Color(0xFFA6BB69)
+            ..strokeWidth = math.max(1.0, unit * .25);
+          canvas.drawLine(ui.Offset(x - unit, y),
+              ui.Offset(x + unit, y - unit * .25), cricket);
+          canvas.drawLine(ui.Offset(x, y),
+              ui.Offset(x + unit * .6, y + unit * .8), cricket);
+          canvas.drawLine(ui.Offset(x, y),
+              ui.Offset(x - unit * .5, y + unit * .7), cricket);
+      }
+    }
+  }
+
+  void _drawFrostDetails(ui.Canvas canvas, double w, double h) {
+    if (!_cold || _snow || temperatureC > 0) return;
+    final frost = const ui.Color(0x887FABB7);
+    for (var i = 0; i < 8; i++) {
+      final x = w * (.05 + (i * 13 % 91) / 100);
+      final y = h * (.655 + (i * 7 % 8) / 100);
+      _rect(canvas, x, y, w * .022, h * .006, frost);
+    }
+  }
+
+  void _drawSunBeam(
+      ui.Canvas canvas, double w, double h, double goblinX, double floor) {
+    if (!_sunBeamActive) return;
+    final phase = .5 + .5 * math.sin(_elapsed * 2.1);
+    final topX = w * .84;
+    final topY = h * .22;
+    final targetY = floor - h * .20;
+    final spread = w * (.022 + .006 * phase);
+    final beam = ui.Path()
+      ..moveTo(topX - w * .038, topY)
+      ..lineTo(topX + w * .038, topY)
+      ..lineTo(goblinX + spread, targetY)
+      ..lineTo(goblinX - spread, targetY)
+      ..close();
+    canvas.drawPath(
+      beam,
+      ui.Paint()
+        ..color = ui.Color.fromARGB((25 + phase * 18).round(), 255, 222, 127),
+    );
+    canvas.drawLine(
+      ui.Offset(topX, topY),
+      ui.Offset(goblinX, targetY),
+      ui.Paint()
+        ..color = ui.Color.fromARGB((68 + phase * 48).round(), 255, 231, 160)
+        ..strokeWidth = math.max(1.5, w * .006),
+    );
+    canvas.drawCircle(
+      ui.Offset(goblinX, targetY),
+      w * (.028 + .005 * phase),
+      ui.Paint()..color = const ui.Color(0x33FFD166),
+    );
+  }
+
+  void _drawSpeechBubble(ui.Canvas canvas, double w, double h) {
+    final message = _dialogue;
+    if (message == null || _dialogueAge <= 0) return;
+
+    final unit = math.max(2.0, math.min(w, h) * .014).toDouble();
+    final fontSize = (w * .033).clamp(10.0, 15.0).toDouble();
+    final painter = TextPainter(
+      text: TextSpan(
+        text: message,
+        style: TextStyle(
+          color: const ui.Color(0xFF26343A),
+          fontSize: fontSize,
+          fontWeight: FontWeight.w700,
+          height: 1.15,
+        ),
+      ),
+      textDirection: ui.TextDirection.ltr,
+      maxLines: 3,
+    )..layout(maxWidth: w * .50);
+
+    const horizontalPadding = 9.0;
+    const verticalPadding = 7.0;
+    final bubbleWidth = painter.width + horizontalPadding * 2;
+    final bubbleHeight = painter.height + verticalPadding * 2;
+    final goblinX = w * _sceneX;
+    final floor = _sceneFloor(h);
+    final left = (goblinX - bubbleWidth / 2).clamp(5.0, w - bubbleWidth - 5);
+    final top = (floor - unit * 30 - bubbleHeight - unit * 2)
+        .clamp(6.0, h - bubbleHeight - 6);
+    final bubble = ui.RRect.fromRectAndRadius(
+      ui.Rect.fromLTWH(left, top, bubbleWidth, bubbleHeight),
+      const ui.Radius.circular(5),
+    );
+    canvas.drawRRect(
+      bubble.shift(const ui.Offset(0, 3)),
+      ui.Paint()..color = const ui.Color(0x99071219),
+    );
+    canvas.drawRRect(bubble, ui.Paint()..color = const ui.Color(0xFFF0DFB8));
+    canvas.drawRRect(
+      bubble,
+      ui.Paint()
+        ..color = const ui.Color(0xFF534335)
+        ..style = ui.PaintingStyle.stroke
+        ..strokeWidth = 1.5,
+    );
+    final tail = ui.Path()
+      ..moveTo(goblinX - unit * 1.8, top + bubbleHeight - 1)
+      ..lineTo(goblinX, top + bubbleHeight + unit * 2.2)
+      ..lineTo(goblinX + unit * 1.8, top + bubbleHeight - 1)
+      ..close();
+    canvas.drawPath(tail, ui.Paint()..color = const ui.Color(0xFFF0DFB8));
+    canvas.drawLine(
+      ui.Offset(goblinX - unit * 1.8, top + bubbleHeight - .5),
+      ui.Offset(goblinX, top + bubbleHeight + unit * 2.2),
+      ui.Paint()
+        ..color = const ui.Color(0xFF534335)
+        ..strokeWidth = 1.3,
+    );
+    canvas.drawLine(
+      ui.Offset(goblinX, top + bubbleHeight + unit * 2.2),
+      ui.Offset(goblinX + unit * 1.8, top + bubbleHeight - .5),
+      ui.Paint()
+        ..color = const ui.Color(0xFF534335)
+        ..strokeWidth = 1.3,
+    );
+    painter.paint(
+      canvas,
+      ui.Offset(left + horizontalPadding, top + verticalPadding),
+    );
+  }
+
+  void _drawPixelTree(ui.Canvas canvas, double centerX, double baseY,
+      double width, double height, ui.Color foliage, bool snow) {
+    final trunkW = width * .13;
+    _rect(canvas, centerX - trunkW / 2, baseY - height * .34, trunkW,
+        height * .34, const ui.Color(0xFF493326));
+    if (snow || weatherCode == 71 || weatherCode == 73) {
+      final pine = ui.Path()
+        ..moveTo(centerX, baseY - height)
+        ..lineTo(centerX - width * .27, baseY - height * .67)
+        ..lineTo(centerX - width * .15, baseY - height * .67)
+        ..lineTo(centerX - width * .40, baseY - height * .38)
+        ..lineTo(centerX - width * .20, baseY - height * .38)
+        ..lineTo(centerX - width * .48, baseY - height * .10)
+        ..lineTo(centerX + width * .48, baseY - height * .10)
+        ..lineTo(centerX + width * .20, baseY - height * .38)
+        ..lineTo(centerX + width * .40, baseY - height * .38)
+        ..lineTo(centerX + width * .15, baseY - height * .67)
+        ..lineTo(centerX + width * .27, baseY - height * .67)
+        ..close();
+      canvas.drawPath(pine, ui.Paint()..color = foliage);
+      final litSide = ui.Path()
+        ..moveTo(centerX, baseY - height)
+        ..lineTo(centerX - width * .27, baseY - height * .67)
+        ..lineTo(centerX - width * .15, baseY - height * .67)
+        ..lineTo(centerX - width * .40, baseY - height * .38)
+        ..lineTo(centerX - width * .20, baseY - height * .38)
+        ..lineTo(centerX - width * .48, baseY - height * .10)
+        ..lineTo(centerX, baseY - height * .10)
+        ..close();
+      canvas.drawPath(litSide, ui.Paint()..color = const ui.Color(0x334EBB9C));
+      if (snow) {
+        for (var tier = 0; tier < 3; tier++) {
+          final y = baseY - height * (.68 - tier * .25);
+          _rect(
+              canvas,
+              centerX - width * (.22 + tier * .08),
+              y,
+              width * (.44 + tier * .16),
+              height * .035,
+              const ui.Color(0xFFEAF7FA));
+        }
+      }
+    } else if (_winterSeason) {
+      final branches = ui.Paint()
+        ..color = const ui.Color(0xFF554239)
+        ..strokeWidth = width * .055
+        ..strokeCap = ui.StrokeCap.square;
+      final crownY = baseY - height * .73;
+      canvas.drawLine(ui.Offset(centerX, baseY - height * .34),
+          ui.Offset(centerX, crownY), branches);
+      for (var branch = 0; branch < 4; branch++) {
+        final y = baseY - height * (.42 + branch * .11);
+        final side = branch.isEven ? -1.0 : 1.0;
+        canvas.drawLine(
+            ui.Offset(centerX, y),
+            ui.Offset(centerX + side * width * .34, y - height * .12),
+            branches);
+        canvas.drawLine(
+            ui.Offset(centerX + side * width * .34, y - height * .12),
+            ui.Offset(centerX + side * width * .46, y - height * .20),
+            branches);
+      }
+    } else {
+      // Chunky canopy tiers make the tree silhouette read at scene scale.
+      final highlight = _autumnWorld
+          ? const ui.Color(0xFFD28B46)
+          : _springWorld
+              ? const ui.Color(0xFF70A85B)
+              : const ui.Color(0xFF347451);
+      for (var tier = 0; tier < 3; tier++) {
+        final tierWidth = width * (1 - tier * .23);
+        final y = baseY - height * (.40 + tier * .25);
+        _rect(canvas, centerX - tierWidth * .42, y, tierWidth * .84,
+            height * .25, foliage);
+        _rect(canvas, centerX - tierWidth * .29, y - height * .09,
+            tierWidth * .58, height * .13, highlight);
+        _rect(
+            canvas,
+            centerX - tierWidth * .30,
+            y,
+            tierWidth * .20,
+            height * .035,
+            _autumnWorld
+                ? const ui.Color(0x44FFD184)
+                : const ui.Color(0x446FC878));
+      }
+      _rect(canvas, centerX - width * .42, baseY - height * .15, width * .84,
+          height * .035, const ui.Color(0xFF193F35));
+    }
+  }
+
+  void _drawSeasonParticles(ui.Canvas canvas, double w, double h) {
+    if (_autumnWorld) {
+      for (var i = 0; i < 15; i++) {
+        final drift =
+            math.sin(_elapsed * _environmentMotionScale * 1.4 + i) * w * .025;
+        final x = (w * ((i * 29 % 97) / 100) +
+                drift +
+                _elapsed * _environmentMotionScale * (8 + i % 3 * 3)) %
+            w;
+        final y = (h * ((i * 17 % 48) / 100) +
+                _elapsed * _environmentMotionScale * (12 + i % 4 * 3)) %
+            (h * .58);
+        final leaf = ui.Path()
+          ..moveTo(x, y)
+          ..lineTo(x + w * .014, y + h * .006)
+          ..lineTo(x + w * .008, y + h * .018)
+          ..lineTo(x - w * .006, y + h * .010)
+          ..close();
+        canvas.drawPath(
+            leaf,
+            ui.Paint()
+              ..color = i.isEven
+                  ? const ui.Color(0xFFE0A04A)
+                  : const ui.Color(0xFFB95F36));
+      }
+    } else if (_springWorld) {
+      for (var i = 0; i < 10; i++) {
+        final x = (w * ((i * 31 % 96) / 100) +
+                math.sin(_elapsed * _environmentMotionScale * 1.8 + i) *
+                    w *
+                    .035 +
+                _elapsed * _environmentMotionScale * 5) %
+            w;
+        final y = (h * ((i * 13 % 44) / 100) +
+                _elapsed * _environmentMotionScale * 9) %
+            (h * .57);
+        final petal =
+            i.isEven ? const ui.Color(0xFFFFD3DF) : const ui.Color(0xFFFFF0BD);
+        _rect(canvas, x, y, w * .012, h * .009, petal);
+        _rect(canvas, x + w * .005, y - h * .004, w * .007, h * .008, petal);
+      }
+    }
+  }
+
+  void _drawCyclone(ui.Canvas canvas, double w, double h) {
+    // Sea, foamy bands, and a small strip of ground under the goblin.
+    _rect(canvas, 0, h * .54, w, h * .46, const ui.Color(0xFF102D50));
+    _rect(canvas, 0, h * .59, w, h * .025, const ui.Color(0xFF24496D));
+    _rect(canvas, 0, h * .70, w, h * .018, const ui.Color(0xFF193B62));
+    _rect(canvas, 0, h * .83, w, h * .025, const ui.Color(0xFF244A70));
+    _rect(canvas, 0, h * .85, w * .47, h * .15, const ui.Color(0xFF294A35));
+    // Broken jetty boards and foam gather at the shore beside the goblin.
+    for (var i = 0; i < 5; i++) {
+      final x = w * (.02 + i * .085);
+      _rect(canvas, x, h * (.82 + (i % 2) * .025), w * .10, h * .014,
+          const ui.Color(0xFF735039));
+      _rect(canvas, x + w * .01, h * (.81 + (i % 2) * .025), w * .008, h * .035,
+          const ui.Color(0xFF503B2D));
+    }
+    for (var i = 0; i < 11; i++) {
+      final x =
+          (i * w / 11 + _elapsed * _wind * 1.1 * _environmentMotionScale) % w;
+      final y = h * (.57 + (i * 13 % 35) / 100);
+      final wave = ui.Path()
+        ..moveTo(x, y)
+        ..lineTo(x + w * .035, y - h * .012)
+        ..lineTo(x + w * .075, y + h * .006);
+      canvas.drawPath(
+          wave,
+          ui.Paint()
+            ..color = const ui.Color(0xFF71AFC1)
+            ..strokeWidth = math.max(1.5, w * .004)
+            ..style = ui.PaintingStyle.stroke);
+      // A broken white cap gives each swell a readable lit edge.
+      _rect(canvas, x + w * .026, y - h * .014, w * .023, h * .006,
+          const ui.Color(0xFFB9D8D8));
+    }
+
+    // Spiral cloud walls rotate around a growing eye as the storm approaches.
+    final approach =
+        (_elapsed * _environmentMotionScale / 30).clamp(0.0, 1.0).toDouble();
+    final center = ui.Offset(w * .74, h * .30);
+    final eye = w * (.045 + .09 * approach);
+    final cloudPaint = ui.Paint()
+      ..style = ui.PaintingStyle.stroke
+      ..strokeWidth = h * .052
+      ..strokeCap = ui.StrokeCap.square
+      ..strokeJoin = ui.StrokeJoin.miter;
+    for (var strand = 0; strand < 3; strand++) {
+      final spiral = ui.Path();
+      for (var step = 0; step <= 180; step++) {
+        final t = step / 180;
+        final angle = t * math.pi * 4.4 +
+            _elapsed * .46 * _environmentMotionScale +
+            strand * math.pi * 2 / 3;
+        final radius = eye + t * w * .27;
+        final point = ui.Offset(
+          center.dx + math.cos(angle) * radius * 1.42,
+          center.dy + math.sin(angle) * radius * .72,
+        );
+        if (step == 0) {
+          spiral.moveTo(point.dx, point.dy);
+        } else {
+          spiral.lineTo(point.dx, point.dy);
+        }
+      }
+      canvas.drawPath(
+          spiral,
+          cloudPaint
+            ..color = strand.isEven
+                ? const ui.Color(0xFF303B55)
+                : const ui.Color(0xFF27334C));
+    }
+    canvas.drawCircle(
+        center, eye, ui.Paint()..color = const ui.Color(0xFF56627A));
+    canvas.drawCircle(
+        center, eye * .48, ui.Paint()..color = const ui.Color(0xFF8291A2));
+
+    // Palm trunks bow farther as the cyclone strengthens.
+    final bend = .055 + .095 * (_wind / 160);
+    for (var i = 0; i < 3; i++) {
+      final bx = w * (.08 + i * .16);
+      final top = ui.Offset(bx + w * bend, h * (.31 + i * .035));
+      final base = ui.Offset(bx, h * .86);
+      final trunkPath = ui.Path()
+        ..moveTo(base.dx, base.dy)
+        ..lineTo(top.dx, top.dy)
+        ..lineTo(top.dx + w * .018, top.dy)
+        ..lineTo(base.dx + w * .028, base.dy)
+        ..close();
+      canvas.drawPath(
+          trunkPath, ui.Paint()..color = const ui.Color(0xFF68442A));
+      for (var ring = 0; ring < 4; ring++) {
+        final t = .25 + ring * .16;
+        final rx = base.dx + (top.dx - base.dx) * t;
+        final ry = base.dy + (top.dy - base.dy) * t;
+        _rect(canvas, rx, ry, w * .023, h * .008, const ui.Color(0xFF94643A));
+      }
+      for (var nut = -1; nut <= 1; nut++) {
+        canvas.drawCircle(ui.Offset(top.dx + nut * w * .014, top.dy + h * .015),
+            w * .009, ui.Paint()..color = const ui.Color(0xFF73502D));
+      }
+      for (var f = -2; f <= 2; f++) {
+        final end = ui.Offset(top.dx + w * (f * .075 - bend * .35),
+            top.dy - h * (.025 + (2 - f.abs()) * .025));
+        final frond = ui.Path()
+          ..moveTo(top.dx, top.dy)
+          ..lineTo(end.dx, end.dy)
+          ..lineTo(end.dx + w * .025, end.dy + h * .015);
+        canvas.drawPath(frond, ui.Paint()..color = const ui.Color(0xFF176044));
+        _rect(canvas, end.dx, end.dy, w * .027, h * .009,
+            const ui.Color(0xFF3A8A54));
+      }
+    }
+    // Flying boards streak by at varying heights.
+    for (var i = 0; i < 5; i++) {
+      final x = (w * ((i * 23 % 90) / 100) +
+              _elapsed * (_wind * 1.5 + i * 9) * _environmentMotionScale) %
+          w;
+      final y = h * (.42 + (i * 17 % 35) / 100);
+      canvas.save();
+      canvas.translate(x, y);
+      canvas.rotate(.3 * math.sin(_elapsed * 4 * _environmentMotionScale + i));
+      _rect(canvas, 0, 0, w * .055, h * .014, const ui.Color(0xFF966C42));
+      canvas.restore();
+    }
+  }
+
+  void _drawFlood(ui.Canvas canvas, double w, double h) {
+    final p = _floodProgress;
+    // Two low-angle houses, built from cuboid walls and wedge-shaped roofs.
+    _drawFloodHouse(canvas, w * .055, h * .40, w, h, true);
+    _drawFloodHouse(canvas, w * .695, h * .36, w, h, false);
+    // Flood line climbs from the street toward the roofs over time.
+    final waterTop = h * (.90 - .36 * p);
+    _rect(canvas, 0, waterTop, w, h - waterTop, const ui.Color(0xCC70472F));
+    _rect(canvas, 0, waterTop, w, h * .018, const ui.Color(0xBFAF7950));
+    // Dark tide stains remain above the moving waterline on the plaster walls.
+    for (final x in [w * .055, w * .695]) {
+      _rect(canvas, x + w * .005, h * .62, w * .18, h * .018,
+          const ui.Color(0xFF503E39));
+    }
+    for (var i = 0; i < 7; i++) {
+      final x =
+          (w * (i / 7) + _elapsed * (24 + i * 4) * _environmentMotionScale) % w;
+      final y = waterTop + h * (.045 + (i % 3) * .055);
+      _rect(canvas, x, y, w * .11, h * .012,
+          i.isEven ? const ui.Color(0xFF785037) : const ui.Color(0xFF5A4836));
+      if (i % 2 == 0) {
+        _rect(canvas, x + w * .025, y - h * .022, w * .055, h * .022,
+            const ui.Color(0xFF9D744C));
+      }
+      _rect(canvas, x + w * .018, y + h * .018, w * .035, h * .004,
+          const ui.Color(0x889DC4C4));
+      if (i % 3 == 1) {
+        // A floating crate catches a cool reflection from the storm sky.
+        _rect(canvas, x + w * .025, y - h * .026, w * .045, h * .025,
+            const ui.Color(0xFF76543A));
+        _rect(canvas, x + w * .03, y - h * .022, w * .035, h * .004,
+            const ui.Color(0xFFB18455));
+        _rect(canvas, x + w * .045, y - h * .025, w * .004, h * .022,
+            const ui.Color(0xFF483B31));
+      }
+    }
+    final floor = h * math.min(.82, .88 - .38 * p);
+    if (p > .18) {
+      final raftX = w * .52;
+      _rect(canvas, raftX - w * .075, floor + h * .005, w * .15, h * .022,
+          const ui.Color(0xFF8C5B34));
+      for (var i = 0; i < 4; i++) {
+        _rect(canvas, raftX - w * .07 + i * w * .037, floor + h * .006,
+            w * .009, h * .02, const ui.Color(0xFFC38A4C));
+      }
+    }
+  }
+
+  void _drawFloodHouse(
+      ui.Canvas canvas, double x, double y, double w, double h, bool warm) {
+    _rect(canvas, x, y, w * .17, h * .30,
+        warm ? const ui.Color(0xFF74594C) : const ui.Color(0xFF62515A));
+    final side = ui.Path()
+      ..moveTo(x + w * .17, y)
+      ..lineTo(x + w * .235, y - h * .035)
+      ..lineTo(x + w * .235, y + h * .265)
+      ..lineTo(x + w * .17, y + h * .30)
+      ..close();
+    canvas.drawPath(side, ui.Paint()..color = const ui.Color(0xFF453C45));
+
+    final roofFront = ui.Path()
+      ..moveTo(x - w * .025, y + h * .015)
+      ..lineTo(x + w * .082, y - h * .095)
+      ..lineTo(x + w * .19, y + h * .015)
+      ..close();
+    final roofSide = ui.Path()
+      ..moveTo(x + w * .082, y - h * .095)
+      ..lineTo(x + w * .26, y - h * .075)
+      ..lineTo(x + w * .235, y + h * .015)
+      ..lineTo(x + w * .19, y + h * .015)
+      ..close();
+    canvas.drawPath(roofFront, ui.Paint()..color = const ui.Color(0xFF383440));
+    canvas.drawPath(roofSide, ui.Paint()..color = const ui.Color(0xFF292C3D));
+    _rect(canvas, x - w * .015, y + h * .012, w * .21, h * .012,
+        const ui.Color(0xFF927052));
+    for (var row = 0; row < 3; row++) {
+      final yy = y - h * .062 + row * h * .024;
+      for (var tile = 0; tile < 4; tile++) {
+        _rect(
+            canvas,
+            x + w * (.006 + tile * .045 + (row.isOdd ? .02 : 0)),
+            yy,
+            w * .032,
+            h * .009,
+            (row + tile).isEven
+                ? const ui.Color(0xFF574D59)
+                : const ui.Color(0xFF413D4B));
+      }
+    }
+
+    final glow = warm ? const ui.Color(0xFFFFC977) : const ui.Color(0xFFECA86E);
+    for (final wx in [x + w * .022, x + w * .105]) {
+      _rect(canvas, wx, y + h * .075, w * .046, h * .075, glow);
+      _rect(canvas, wx + w * .020, y + h * .075, w * .006, h * .075,
+          const ui.Color(0xFF624A43));
+      _rect(canvas, wx, y + h * .108, w * .046, h * .007,
+          const ui.Color(0xFF624A43));
+      _rect(canvas, wx - w * .008, y + h * .065, w * .062, h * .012,
+          const ui.Color(0xFF3B3440));
+    }
+    _rect(canvas, x + w * .073, y + h * .18, w * .042, h * .12,
+        const ui.Color(0xFF392C2B));
+    _rect(canvas, x + w * .104, y + h * .23, w * .006, h * .006,
+        const ui.Color(0xFFFFD083));
+    _rect(canvas, x + w * .19, y - h * .12, w * .022, h * .10,
+        const ui.Color(0xFF493E43));
+    _rect(canvas, x + w * .185, y - h * .125, w * .032, h * .015,
+        const ui.Color(0xFF80706B));
+    for (var row = 0; row < 4; row++) {
+      _rect(canvas, x + w * .012, y + h * (.17 + row * .026), w * .15, h * .005,
+          const ui.Color(0x337F6655));
+    }
+    _rect(canvas, x + w * .183, y + h * .06, w * .008, h * .16,
+        const ui.Color(0xFF332F3A));
+  }
+
+  void _drawFloodAlert(
+      ui.Canvas canvas, double w, double h, double floor, double p) {
+    if (p < .35) return;
+    final pulse = reduceFlashing || reduceMotion
+        ? 1.0
+        : .96 + .04 * math.sin(_elapsed * 3.5);
+    final x = w * .52;
+    _rect(canvas, x + w * .045, floor - h * .43, w * .052 * pulse,
+        h * .095 * pulse, const ui.Color(0xFFCF343A));
+    _rect(canvas, x + w * .066, floor - h * .412, w * .010, h * .043,
+        const ui.Color(0xFFFFFFFF));
+    _rect(canvas, x + w * .066, floor - h * .358, w * .010, h * .012,
+        const ui.Color(0xFFFFFFFF));
+  }
+
+  void _drawSandstorm(ui.Canvas canvas, double w, double h) {
+    // The actual local landmark remains behind these moving dust veils.
+    final dune = ui.Path()
+      ..moveTo(0, h * .68)
+      ..quadraticBezierTo(w * .25, h * .48, w * .48, h * .66)
+      ..quadraticBezierTo(w * .76, h * .49, w, h * .67)
+      ..lineTo(w, h)
+      ..lineTo(0, h)
+      ..close();
+    canvas.drawPath(dune, ui.Paint()..color = const ui.Color(0xFFD28A4E));
+    // Sparse thorn scrub fits regional drylands without suggesting one exact desert.
+    for (var i = 0; i < 3; i++) {
+      final x = w * (.12 + i * .34);
+      final y = h * (.75 + (i % 2) * .035);
+      _rect(canvas, x, y - h * .055, w * .012, h * .06,
+          const ui.Color(0xFF62563B));
+      _rect(canvas, x - w * .03, y - h * .04, w * .075, h * .01,
+          const ui.Color(0xFF877043));
+    }
+    for (var i = 0; i < 7; i++) {
+      final sx = w * (.23 + i * .03);
+      final sy = h * (.84 + (i % 2) * .018);
+      _rect(canvas, sx, sy, w * .016, h * .007, const ui.Color(0xFF9B623A));
+    }
+    for (var i = 0; i < 6; i++) {
+      final y = h * (.30 + i * .09);
+      _rect(canvas, 0, y, w, h * .025,
+          ui.Color.fromARGB(20 + i * 3, 255, 206, 133));
+    }
+  }
+
+  void _drawSkyDetails(ui.Canvas canvas, double w, double h) {
+    if (!isDay && !_storm && !_rain && !_fog && _cloudCoverage < 35) {
+      final starPaint = ui.Paint()..color = const ui.Color(0xCCEDF5FF);
+      for (var i = 0; i < 34; i++) {
+        final x = w * ((i * 37 % 97) / 100);
+        final y = h * (.035 + (i * 19 % 37) / 100);
+        final r = i % 7 == 0 ? 1.8 : 1.0;
+        canvas.drawCircle(ui.Offset(x, y), r, starPaint);
+      }
+    }
+    // Soft bands of pixel clouds and distant haze give the sky depth.
+    if (!_storm && !_fog && !_overcast) {
+      final haze =
+          isDay ? const ui.Color(0x223B8FAD) : const ui.Color(0x221B3154);
+      _rect(canvas, 0, h * .43, w, h * .045, haze);
+      _rect(canvas, w * .08, h * .37, w * .22, h * .018,
+          const ui.Color(0x1FFFFFFF));
+      _rect(canvas, w * .63, h * .32, w * .26, h * .014,
+          const ui.Color(0x1FFFFFFF));
+    }
+  }
+
+  /// Landmark selection is stable for a city; weather and season are layered
+  /// around it so the location remains recognizable after refreshes.
+  void _drawCatalogLandmark(ui.Canvas canvas, double w, double h) {
+    final stone = !isDay
+        ? const ui.Color(0xFF647283)
+        : _winterWorld
+            ? const ui.Color(0xFFB9C9CF)
+            : _storm || _overcast
+                ? const ui.Color(0xFF777E7D)
+                : const ui.Color(0xFFC79B69);
+    final darkStone = const ui.Color(0xFF54473E);
+    final goldStone =
+        isDay ? const ui.Color(0xFFE5B850) : const ui.Color(0xFF8B7048);
+    final water = !isDay || _storm
+        ? const ui.Color(0xFF24465F)
+        : const ui.Color(0xFF347F94);
+    switch (location.landmark) {
+      case WorldLandmark.none:
+        _drawRegionalFallback(canvas, w, h, stone, darkStone, water);
+      case WorldLandmark.tajMahal:
+        _drawTajMahal(canvas, w, h);
+      case WorldLandmark.jaisalmerFort:
+        _drawJaisalmerFort(canvas, w, h);
+      case WorldLandmark.hawaMahal:
+        _rect(canvas, w * .24, h * .40, w * .52, h * .19,
+            const ui.Color(0xFFC97867));
+        _rect(canvas, w * .29, h * .365, w * .42, h * .05,
+            const ui.Color(0xFFD78D78));
+        for (var row = 0; row < 4; row++) {
+          for (var col = 0; col < 7; col++) {
+            final x = w * (.285 + col * .061);
+            final y = h * (.425 + row * .037);
+            _rect(canvas, x, y, w * .027, h * .025, const ui.Color(0xFF543F3D));
+            _rect(canvas, x + w * .005, y + h * .005, w * .017, h * .014,
+                const ui.Color(0xFFE6B6A2));
+          }
+        }
+        for (var i = 0; i < 5; i++) {
+          final x = w * (.30 + i * .10);
+          _rect(canvas, x, h * .345, w * .055, h * .026,
+              const ui.Color(0xFFB96455));
+          canvas.drawCircle(ui.Offset(x + w * .027, h * .344), w * .027,
+              ui.Paint()..color = const ui.Color(0xFFD78D78));
+        }
+      case WorldLandmark.indiaGate:
+      case WorldLandmark.gatewayOfIndia:
+        final gateway = location.landmark == WorldLandmark.gatewayOfIndia;
+        final color = gateway ? const ui.Color(0xFFB78A5B) : stone;
+        _rect(canvas, w * .34, h * .43, w * .32, h * .15, color);
+        _rect(canvas, w * .29, h * .40, w * .42, h * .035, color);
+        _rect(canvas, w * .40, h * .455, w * .20, h * .125, darkStone);
+        final arch = ui.Path()
+          ..moveTo(w * .405, h * .58)
+          ..lineTo(w * .405, h * .485)
+          ..quadraticBezierTo(w * .50, h * .39, w * .595, h * .485)
+          ..lineTo(w * .595, h * .58)
+          ..close();
+        canvas.drawPath(arch, ui.Paint()..color = color);
+        _rect(canvas, w * .465, h * .48, w * .07, h * .10, darkStone);
+        _rect(canvas, w * .28, h * .58, w * .44, h * .018,
+            const ui.Color(0xFF7B6048));
+        if (gateway) {
+          _rect(canvas, 0, h * .68, w, h * .22, water);
+          for (var i = 0; i < 5; i++) {
+            _rect(canvas, w * (.08 + i * .18), h * (.72 + (i % 2) * .06),
+                w * .07, h * .006, const ui.Color(0x887ED9D6));
+          }
+        } else {
+          _rect(canvas, w * .47, h * .61, w * .06, h * .06,
+              const ui.Color(0xFFFFD889));
+        }
+      case WorldLandmark.howrahBridge:
+        _rect(canvas, 0, h * .72, w, h * .20, water);
+        _rect(canvas, w * .04, h * .55, w * .92, h * .025,
+            const ui.Color(0xFF6E6254));
+        for (var i = 0; i < 7; i++) {
+          final x = w * (.08 + i * .135);
+          _rect(canvas, x, h * .38, w * .018, h * .19, stone);
+          _rect(canvas, x - w * .018, h * .37, w * .055, h * .018, stone);
+          _rect(canvas, x - w * .018, h * .42, w * .055, h * .012, darkStone);
+        }
+        for (var i = 0; i < 8; i++) {
+          final x = w * (.08 + i * .12);
+          canvas.drawLine(
+              ui.Offset(x, h * .40),
+              ui.Offset(x + w * .12, h * .55),
+              ui.Paint()
+                ..color = const ui.Color(0xFF9D927C)
+                ..strokeWidth = 1.4);
+          canvas.drawLine(
+              ui.Offset(x, h * .55),
+              ui.Offset(x + w * .12, h * .40),
+              ui.Paint()
+                ..color = const ui.Color(0xFF9D927C)
+                ..strokeWidth = 1.1);
+        }
+      case WorldLandmark.varanasiGhats:
+      case WorldLandmark.bhopalLake:
+        _rect(canvas, 0, h * .65, w, h * .28, water);
+        for (var i = 0; i < 8; i++) {
+          final x = w * (.04 + i * .12);
+          final top = h * (.46 + (i % 3) * .035);
+          _rect(canvas, x, top, w * .15, h * .65 - top,
+              i.isEven ? stone : const ui.Color(0xFF9C7958));
+          _rect(canvas, x - w * .01, top - h * .025, w * .17, h * .025,
+              darkStone);
+          _rect(canvas, x + w * .04, top + h * .10, w * .018, h * .04,
+              const ui.Color(0xFFFFCC73));
+        }
+        if (location.landmark == WorldLandmark.bhopalLake) {
+          _rect(canvas, w * .42, h * .46, w * .16, h * .14, stone);
+          _rect(canvas, w * .39, h * .43, w * .22, h * .035, goldStone);
+          _rect(canvas, w * .47, h * .40, w * .06, h * .035, stone);
+        } else {
+          _rect(canvas, w * .46, h * .39, w * .08, h * .26, stone);
+          final dome = ui.Path()
+            ..moveTo(w * .46, h * .40)
+            ..quadraticBezierTo(w * .50, h * .32, w * .54, h * .40)
+            ..close();
+          canvas.drawPath(dome, ui.Paint()..color = goldStone);
+        }
+        _rect(canvas, w * .17, h * .82, w * .11, h * .012,
+            const ui.Color(0xFF704A34));
+        _rect(canvas, w * .21, h * .78, w * .012, h * .045,
+            const ui.Color(0xFF704A34));
+      case WorldLandmark.goldenTemple:
+        _rect(canvas, w * .16, h * .62, w * .68, h * .24,
+            const ui.Color(0xFF29485B));
+        for (var i = 0; i < 6; i++) {
+          _rect(canvas, w * (.20 + i * .115), h * (.69 + (i % 2) * .06),
+              w * .075, h * .006, const ui.Color(0x77E7EBC9));
+        }
+        _rect(canvas, w * .36, h * .46, w * .28, h * .18,
+            const ui.Color(0xFFAA772C));
+        _rect(canvas, w * .33, h * .44, w * .34, h * .035, goldStone);
+        _rect(canvas, w * .43, h * .39, w * .14, h * .07, goldStone);
+        canvas.drawOval(ui.Rect.fromLTWH(w * .43, h * .355, w * .14, h * .075),
+            ui.Paint()..color = const ui.Color(0xFFFFD35F));
+        _rect(canvas, w * .485, h * .335, w * .03, h * .03, goldStone);
+      case WorldLandmark.charminar:
+        _rect(canvas, w * .36, h * .46, w * .28, h * .14, stone);
+        _rect(canvas, w * .32, h * .44, w * .36, h * .035, goldStone);
+        for (final x in [w * .25, w * .34, w * .62, w * .71]) {
+          _rect(canvas, x, h * .34, w * .035, h * .26, stone);
+          _rect(canvas, x - w * .012, h * .39, w * .06, h * .012, goldStone);
+          _rect(canvas, x - w * .012, h * .47, w * .06, h * .012, goldStone);
+          canvas.drawCircle(ui.Offset(x + w * .017, h * .34), w * .027,
+              ui.Paint()..color = goldStone);
+          _rect(canvas, x + w * .012, h * .31, w * .01, h * .035, stone);
+        }
+        _rect(canvas, w * .455, h * .51, w * .09, h * .09, darkStone);
+      case WorldLandmark.chennaiLighthouse:
+        _rect(canvas, 0, h * .67, w, h * .26, water);
+        _rect(canvas, w * .62, h * .38, w * .10, h * .30,
+            const ui.Color(0xFFE8D9BC));
+        _rect(canvas, w * .59, h * .36, w * .16, h * .035,
+            const ui.Color(0xFFC35048));
+        _rect(canvas, w * .64, h * .31, w * .06, h * .05,
+            const ui.Color(0xFFC35048));
+        _rect(canvas, w * .65, h * .28, w * .04, h * .03,
+            const ui.Color(0xFFFFE59B));
+        for (var i = 0; i < 4; i++) {
+          _rect(canvas, w * (.08 + i * .09), h * (.80 + (i % 2) * .05), w * .06,
+              h * .006, const ui.Color(0x887ED9D6));
+        }
+      case WorldLandmark.bengaluruPalace:
+        _rect(canvas, w * .22, h * .46, w * .56, h * .16,
+            const ui.Color(0xFF886C4C));
+        _rect(canvas, w * .18, h * .43, w * .64, h * .035,
+            const ui.Color(0xFF513D36));
+        for (var i = 0; i < 5; i++) {
+          final x = w * (.23 + i * .12);
+          _rect(canvas, x, h * .38, w * .035, h * .08,
+              const ui.Color(0xFFB17F56));
+          _rect(canvas, x - w * .01, h * .37, w * .055, h * .018,
+              const ui.Color(0xFF5C4335));
+          _rect(canvas, x + w * .012, h * .50, w * .014, h * .045,
+              const ui.Color(0xFFFFD58A));
+        }
+        for (var i = 0; i < 4; i++) {
+          _drawPixelTree(canvas, w * (.08 + i * .19), h * .63, w * .13, h * .23,
+              const ui.Color(0xFF286844), false);
+        }
+      case WorldLandmark.kochiFishingNets:
+        _rect(canvas, 0, h * .68, w, h * .27, water);
+        for (var i = 0; i < 3; i++) {
+          final x = w * (.17 + i * .29);
+          _rect(canvas, x, h * .36, w * .012, h * .36, darkStone);
+          _rect(canvas, x + w * .12, h * .39, w * .012, h * .33, darkStone);
+          canvas.drawLine(
+              ui.Offset(x, h * .38),
+              ui.Offset(x + w * .12, h * .65),
+              ui.Paint()
+                ..color = stone
+                ..strokeWidth = 1.5);
+          for (var j = 0; j < 5; j++) {
+            canvas.drawLine(
+                ui.Offset(x + w * (.015 + j * .022), h * .42),
+                ui.Offset(x + w * (.12 - j * .018), h * .64),
+                ui.Paint()
+                  ..color = const ui.Color(0xFFB4A083)
+                  ..strokeWidth = 1);
+          }
+        }
+        _rect(canvas, w * .58, h * .79, w * .18, h * .025,
+            const ui.Color(0xFF80543B));
+        _rect(canvas, w * .63, h * .75, w * .06, h * .04,
+            const ui.Color(0xFFAD7951));
+      case WorldLandmark.srinagarLake:
+        _drawMountainRange(canvas, w, h, true);
+        _rect(canvas, 0, h * .69, w, h * .24, water);
+        _rect(canvas, w * .12, h * .62, w * .28, h * .10,
+            const ui.Color(0xFF765A43));
+        _rect(canvas, w * .09, h * .59, w * .34, h * .035,
+            const ui.Color(0xFF503B32));
+        _rect(canvas, w * .20, h * .55, w * .12, h * .045,
+            const ui.Color(0xFF926D4A));
+        _rect(canvas, w * .18, h * .545, w * .16, h * .014,
+            const ui.Color(0xFF4A382F));
+        for (var i = 0; i < 4; i++) {
+          _rect(canvas, w * (.52 + i * .09), h * (.78 + (i % 2) * .04), w * .05,
+              h * .004, const ui.Color(0x887ED9D6));
+        }
+      case WorldLandmark.shimlaHills:
+        _drawMountainRange(canvas, w, h, _snow || _winterWorld);
+        for (var i = 0; i < 5; i++) {
+          final x = w * (.08 + i * .18);
+          final y = h * (.48 + (i % 2) * .055);
+          _rect(canvas, x, y, w * .13, h * .14, const ui.Color(0xFFB99168));
+          _rect(canvas, x - w * .012, y - h * .026, w * .155, h * .035,
+              const ui.Color(0xFF573C35));
+          _rect(canvas, x + w * .045, y + h * .045, w * .022, h * .055,
+              const ui.Color(0xFFFFD58A));
+        }
+        for (var i = 0; i < 4; i++) {
+          _drawPixelTree(canvas, w * (.04 + i * .24), h * .66, w * .12, h * .25,
+              const ui.Color(0xFF24533E), _snow || _winterWorld);
+        }
+      case WorldLandmark.lehMonastery:
+        _drawMountainRange(canvas, w, h, _snow || _winterWorld);
+        _rect(canvas, w * .26, h * .44, w * .48, h * .18,
+            const ui.Color(0xFFB99568));
+        _rect(canvas, w * .22, h * .41, w * .56, h * .04,
+            const ui.Color(0xFF8E4939));
+        _rect(canvas, w * .36, h * .34, w * .28, h * .09,
+            const ui.Color(0xFFC9A679));
+        _rect(canvas, w * .32, h * .32, w * .36, h * .03,
+            const ui.Color(0xFF8E4939));
+        _rect(canvas, w * .45, h * .50, w * .10, h * .12, darkStone);
+        for (var i = 0; i < 5; i++) {
+          _rect(canvas, w * (.31 + i * .085), h * .47, w * .028, h * .035,
+              const ui.Color(0xFFFFD58A));
+        }
+      case WorldLandmark.rishikeshBridge:
+        _rect(canvas, 0, h * .66, w, h * .28, water);
+        _rect(canvas, w * .08, h * .53, w * .84, h * .024,
+            const ui.Color(0xFF7C6349));
+        for (final x in [w * .20, w * .78]) {
+          _rect(canvas, x, h * .39, w * .025, h * .20,
+              const ui.Color(0xFF72583F));
+          _rect(canvas, x - w * .018, h * .38, w * .06, h * .025,
+              const ui.Color(0xFF8C6C4A));
+          canvas.drawLine(
+              ui.Offset(x + w * .012, h * .40),
+              ui.Offset(w * .50, h * .54),
+              ui.Paint()
+                ..color = const ui.Color(0xFFD5B887)
+                ..strokeWidth = 1.4);
+        }
+        for (var i = 0; i < 5; i++) {
+          _rect(canvas, w * (.29 + i * .09), h * .53, w * .006, h * .08,
+              const ui.Color(0xFF9C815D));
+        }
+      case WorldLandmark.eiffelTower:
+        final tower = ui.Path()
+          ..moveTo(w * .50, h * .28)
+          ..lineTo(w * .39, h * .62)
+          ..lineTo(w * .61, h * .62)
+          ..close();
+        canvas.drawPath(tower, ui.Paint()..color = darkStone);
+        _rect(canvas, w * .455, h * .41, w * .09, h * .015, stone);
+        _rect(canvas, w * .43, h * .50, w * .14, h * .018, stone);
+        _rect(canvas, w * .36, h * .61, w * .28, h * .02, darkStone);
+        _rect(canvas, w * .492, h * .23, w * .016, h * .07, stone);
+        _rect(canvas, w * .46, h * .62, w * .08, h * .06, darkStone);
+        _rect(canvas, w * .44, h * .68, w * .12, h * .22, water);
+        break;
+      case WorldLandmark.bigBen:
+        _rect(canvas, w * .57, h * .30, w * .16, h * .38,
+            const ui.Color(0xFF7C775F));
+        _rect(canvas, w * .55, h * .27, w * .20, h * .045,
+            const ui.Color(0xFF9A916F));
+        _rect(canvas, w * .59, h * .23, w * .12, h * .04,
+            const ui.Color(0xFF6D6653));
+        _rect(canvas, w * .62, h * .19, w * .06, h * .04,
+            const ui.Color(0xFF9A916F));
+        _rect(canvas, w * .605, h * .35, w * .07, h * .07,
+            const ui.Color(0xFFFFE8A6));
+        canvas.drawCircle(ui.Offset(w * .64, h * .385), w * .024,
+            ui.Paint()..color = const ui.Color(0xFF634E36));
+        _rect(canvas, 0, h * .70, w, h * .20, water);
+        _rect(canvas, w * .08, h * .66, w * .84, h * .018,
+            const ui.Color(0xFF74563C));
+      case WorldLandmark.newYorkSkyline:
+      case WorldLandmark.singaporeSkyline:
+      case WorldLandmark.dubaiTower:
+        _rect(
+            canvas,
+            0,
+            h * .69,
+            w,
+            h * .23,
+            location.landmark == WorldLandmark.singaporeSkyline
+                ? water
+                : const ui.Color(0xFF334E60));
+        for (var i = 0; i < 9; i++) {
+          final x = w * (.03 + i * .105);
+          final buildingH = h * (.13 + (i * 7 % 18) / 100);
+          _rect(
+              canvas,
+              x,
+              h * .67 - buildingH,
+              w * .085,
+              buildingH,
+              i.isEven
+                  ? const ui.Color(0xFF596779)
+                  : const ui.Color(0xFF796B5E));
+          for (var row = 0; row < 4; row++) {
+            _rect(canvas, x + w * .018, h * .53 + row * h * .025, w * .012,
+                h * .010, const ui.Color(0xFFFFD78B));
+          }
+        }
+        if (location.landmark == WorldLandmark.dubaiTower) {
+          final tower = ui.Path()
+            ..moveTo(w * .53, h * .12)
+            ..lineTo(w * .47, h * .68)
+            ..lineTo(w * .61, h * .68)
+            ..close();
+          canvas.drawPath(
+              tower, ui.Paint()..color = const ui.Color(0xFF9EAAAE));
+          _rect(canvas, w * .525, h * .08, w * .01, h * .06,
+              const ui.Color(0xFFCBD4CF));
+        } else if (location.landmark == WorldLandmark.newYorkSkyline) {
+          _rect(canvas, w * .82, h * .43, w * .045, h * .18,
+              const ui.Color(0xFF62899A));
+          canvas.drawCircle(ui.Offset(w * .843, h * .40), w * .03,
+              ui.Paint()..color = const ui.Color(0xFF62899A));
+          _rect(canvas, w * .80, h * .35, w * .085, h * .018,
+              const ui.Color(0xFF62899A));
+        }
+      case WorldLandmark.tokyoFuji:
+        _drawMountainRange(canvas, w, h, true);
+        final fuji = ui.Path()
+          ..moveTo(w * .58, h * .55)
+          ..lineTo(w * .78, h * .24)
+          ..lineTo(w * .96, h * .55)
+          ..close();
+        canvas.drawPath(fuji, ui.Paint()..color = const ui.Color(0xFF536778));
+        final cap = ui.Path()
+          ..moveTo(w * .72, h * .34)
+          ..lineTo(w * .78, h * .24)
+          ..lineTo(w * .85, h * .36)
+          ..lineTo(w * .80, h * .34)
+          ..lineTo(w * .77, h * .38)
+          ..close();
+        canvas.drawPath(cap, ui.Paint()..color = const ui.Color(0xFFE9F1EF));
+        _rect(canvas, w * .10, h * .56, w * .25, h * .07,
+            const ui.Color(0xFF7C4B40));
+        _rect(canvas, w * .08, h * .54, w * .29, h * .025,
+            const ui.Color(0xFF47352F));
+        for (var i = 0; i < 4; i++) {
+          _rect(canvas, w * (.13 + i * .055), h * .575, w * .012, h * .025,
+              const ui.Color(0xFFFFD58A));
+        }
+      case WorldLandmark.colosseum:
+        _rect(canvas, w * .20, h * .40, w * .60, h * .22,
+            const ui.Color(0xFFB28B62));
+        _rect(canvas, w * .17, h * .38, w * .66, h * .035,
+            const ui.Color(0xFF806249));
+        for (var row = 0; row < 2; row++) {
+          for (var col = 0; col < 7; col++) {
+            final x = w * (.235 + col * .077);
+            final y = h * (.44 + row * .085);
+            _rect(canvas, x, y, w * .038, h * .065, darkStone);
+            canvas.drawArc(
+                ui.Rect.fromLTWH(x, y - h * .025, w * .038, h * .05),
+                math.pi,
+                math.pi,
+                false,
+                ui.Paint()
+                  ..color = const ui.Color(0xFFB28B62)
+                  ..style = ui.PaintingStyle.stroke
+                  ..strokeWidth = 2);
+          }
+        }
+      case WorldLandmark.cairoPyramids:
+        _drawPyramids(canvas, w, h);
+      case WorldLandmark.sydneyOperaHouse:
+        _rect(canvas, 0, h * .69, w, h * .23, water);
+        _rect(canvas, w * .15, h * .64, w * .70, h * .04,
+            const ui.Color(0xFF74614C));
+        for (var i = 0; i < 4; i++) {
+          final x = w * (.25 + i * .13);
+          final sail = ui.Path()
+            ..moveTo(x, h * .63)
+            ..quadraticBezierTo(
+                x + w * .035, h * (.34 + i % 2 * .035), x + w * .09, h * .63)
+            ..close();
+          canvas.drawPath(sail, ui.Paint()..color = const ui.Color(0xFFE8E0CB));
+          canvas.drawLine(
+              ui.Offset(x + w * .045, h * .39),
+              ui.Offset(x + w * .045, h * .63),
+              ui.Paint()
+                ..color = const ui.Color(0xFFAAA797)
+                ..strokeWidth = 1);
+        }
+      case WorldLandmark.rioMountain:
+        _drawMountainRange(canvas, w, h, false);
+        final hill = ui.Path()
+          ..moveTo(w * .20, h * .67)
+          ..quadraticBezierTo(w * .28, h * .42, w * .48, h * .51)
+          ..quadraticBezierTo(w * .63, h * .39, w * .83, h * .67)
+          ..close();
+        canvas.drawPath(hill, ui.Paint()..color = const ui.Color(0xFF446C59));
+        canvas.drawLine(
+            ui.Offset(w * .56, h * .35),
+            ui.Offset(w * .56, h * .55),
+            ui.Paint()
+              ..color = const ui.Color(0xFFE8E2D5)
+              ..strokeWidth = 3);
+        canvas.drawLine(
+            ui.Offset(w * .51, h * .41),
+            ui.Offset(w * .61, h * .41),
+            ui.Paint()
+              ..color = const ui.Color(0xFFE8E2D5)
+              ..strokeWidth = 3);
+        _rect(canvas, 0, h * .73, w, h * .18, water);
+    }
+  }
+
+  void _drawMountainRange(ui.Canvas canvas, double w, double h, bool snowy) {
+    for (var i = 0; i < 4; i++) {
+      final left = w * (.02 + i * .24);
+      final peak = left + w * (.14 + (i % 2) * .04);
+      final right = left + w * .30;
+      final baseY = h * (.59 + (i % 2) * .035);
+      final peakY = h * (.25 + (i % 3) * .045);
+      final mountain = ui.Path()
+        ..moveTo(left, baseY)
+        ..lineTo(peak, peakY)
+        ..lineTo(right, baseY)
+        ..close();
+      canvas.drawPath(mountain,
+          ui.Paint()..color = const ui.Color(0xFF596D72).withOpacity(.72));
+      if (snowy) {
+        final cap = ui.Path()
+          ..moveTo(peak - w * .055, peakY + h * .095)
+          ..lineTo(peak, peakY)
+          ..lineTo(peak + w * .055, peakY + h * .095)
+          ..lineTo(peak + w * .018, peakY + h * .075)
+          ..lineTo(peak, peakY + h * .09)
+          ..lineTo(peak - w * .018, peakY + h * .07)
+          ..close();
+        canvas.drawPath(cap, ui.Paint()..color = const ui.Color(0xFFDCEAF0));
+      }
+    }
+  }
+
+  void _drawPyramids(ui.Canvas canvas, double w, double h) {
+    final sand = const ui.Color(0xFFD4A461);
+    for (var i = 0; i < 3; i++) {
+      final left = w * (.15 + i * .24);
+      final peakX = left + w * (.12 + (i % 2) * .03);
+      final baseY = h * (.63 + (i % 2) * .02);
+      final peakY = h * (.35 + (i % 2) * .035);
+      final pyramid = ui.Path()
+        ..moveTo(left, baseY)
+        ..lineTo(peakX, peakY)
+        ..lineTo(left + w * .24, baseY)
+        ..close();
+      canvas.drawPath(pyramid, ui.Paint()..color = sand);
+      canvas.drawLine(
+          ui.Offset(peakX, peakY),
+          ui.Offset(peakX, baseY),
+          ui.Paint()
+            ..color = const ui.Color(0x6684513A)
+            ..strokeWidth = 1.2);
+    }
+  }
+
+  void _drawRegionalFallback(ui.Canvas canvas, double w, double h,
+      ui.Color stone, ui.Color darkStone, ui.Color water) {
+    switch (location.biome) {
+      case WorldBiome.desert:
+        final dune = ui.Path()
+          ..moveTo(0, h * .72)
+          ..quadraticBezierTo(w * .28, h * .61, w * .53, h * .72)
+          ..quadraticBezierTo(w * .80, h * .82, w, h * .66)
+          ..lineTo(w, h)
+          ..lineTo(0, h)
+          ..close();
+        canvas.drawPath(dune, ui.Paint()..color = const ui.Color(0xFFD6A157));
+        for (var i = 0; i < 3; i++) {
+          final x = w * (.12 + i * .34);
+          _rect(canvas, x, h * .55, w * .018, h * .16,
+              const ui.Color(0xFF705136));
+          _rect(canvas, x - w * .04, h * .53, w * .10, h * .015,
+              const ui.Color(0xFF477046));
+        }
+      case WorldBiome.coldDesert:
+      case WorldBiome.mountain:
+        _drawMountainRange(canvas, w, h, _snow || _winterWorld);
+        for (var i = 0; i < 4; i++) {
+          _drawPixelTree(canvas, w * (.08 + i * .25), h * .68, w * .13, h * .25,
+              const ui.Color(0xFF28513E), _snow || _winterWorld);
+        }
+      case WorldBiome.coastal:
+        _rect(canvas, 0, h * .65, w, h * .30, water);
+        for (var i = 0; i < 5; i++) {
+          _rect(canvas, w * (.05 + i * .10), h * (.72 + (i % 2) * .05), w * .09,
+              h * .005, const ui.Color(0x887ED9D6));
+        }
+        for (var i = 0; i < 3; i++) {
+          final x = w * (.20 + i * .28);
+          _rect(canvas, x, h * .43, w * .018, h * .24,
+              const ui.Color(0xFF69462E));
+          _rect(canvas, x - w * .07, h * .41, w * .15, h * .02,
+              const ui.Color(0xFF2E7049));
+        }
+      case WorldBiome.river:
+        _rect(canvas, 0, h * .68, w, h * .27, water);
+        _rect(canvas, w * .06, h * .56, w * .88, h * .018, stone);
+        for (var i = 0; i < 4; i++) {
+          final x = w * (.08 + i * .23);
+          _rect(canvas, x, h * .43, w * .14, h * .13, stone);
+          _rect(canvas, x - w * .012, h * .40, w * .165, h * .035, darkStone);
+        }
+      case WorldBiome.urban:
+        for (var i = 0; i < 8; i++) {
+          final x = w * (.02 + i * .12);
+          final buildingH = h * (.14 + (i * 5 % 17) / 100);
+          _rect(canvas, x, h * .66 - buildingH, w * .10, buildingH,
+              i.isEven ? stone : darkStone);
+          for (var row = 0; row < 3; row++) {
+            _rect(canvas, x + w * .025, h * .53 + row * h * .035, w * .018,
+                h * .014, const ui.Color(0xFFFFD58A));
+          }
+        }
+      case WorldBiome.tropical:
+        for (var i = 0; i < 6; i++) {
+          final x = w * (.05 + i * .18);
+          _rect(canvas, x + w * .045, h * .43, w * .015, h * .27,
+              const ui.Color(0xFF68452D));
+          for (var f = -2; f <= 2; f++) {
+            final frond = ui.Path()
+              ..moveTo(x + w * .05, h * .45)
+              ..lineTo(x + w * (.05 + f * .055), h * (.37 + f.abs() * .02));
+            canvas.drawPath(
+                frond,
+                ui.Paint()
+                  ..color = const ui.Color(0xFF28734A)
+                  ..strokeWidth = 3);
+          }
+        }
+      case WorldBiome.temperate:
+        for (var i = 0; i < 7; i++) {
+          _drawPixelTree(canvas, w * (.02 + i * .15), h * .67, w * .14, h * .26,
+              const ui.Color(0xFF2E6445), _snow || _winterWorld);
+        }
+    }
+  }
+
+  void _drawTajMahal(ui.Canvas canvas, double w, double h) {
+    final marble = !isDay
+        ? const ui.Color(0xFF718093)
+        : _storm
+            ? const ui.Color(0xFFBCC9CC)
+            : _winterWorld
+                ? const ui.Color(0xFFE7F0EE)
+                : const ui.Color(0xFFF0E7D4);
+    final shade = !isDay
+        ? const ui.Color(0xFF46566D)
+        : _storm
+            ? const ui.Color(0xFF7B929A)
+            : const ui.Color(0xFFB9B4A6);
+    final dark =
+        !isDay ? const ui.Color(0xFF18253B) : const ui.Color(0xFF354357);
+
+    // Long marble plinth and its dark water channel establish the symmetry.
+    _rect(canvas, w * .25, h * .565, w * .50, h * .018, dark);
+    _rect(canvas, w * .30, h * .535, w * .40, h * .038, marble);
+    _rect(canvas, w * .28, h * .525, w * .44, h * .014, shade);
+    _rect(canvas, w * .34, h * .548, w * .32, h * .010, shade);
+
+    // Main mausoleum body, central pointed arch, and onion dome.
+    _rect(canvas, w * .385, h * .415, w * .23, h * .12, marble);
+    _rect(canvas, w * .37, h * .405, w * .26, h * .018, shade);
+    final dome = ui.Path()
+      ..moveTo(w * .435, h * .415)
+      ..quadraticBezierTo(w * .435, h * .335, w * .50, h * .315)
+      ..quadraticBezierTo(w * .565, h * .335, w * .565, h * .415)
+      ..close();
+    canvas.drawPath(dome, ui.Paint()..color = marble);
+    _rect(canvas, w * .493, h * .295, w * .014, h * .025, shade);
+    _rect(canvas, w * .486, h * .289, w * .028, h * .008,
+        const ui.Color(0xFFD8B765));
+
+    final arch = ui.Path()
+      ..moveTo(w * .465, h * .535)
+      ..lineTo(w * .465, h * .465)
+      ..quadraticBezierTo(w * .50, h * .425, w * .535, h * .465)
+      ..lineTo(w * .535, h * .535)
+      ..close();
+    canvas.drawPath(arch, ui.Paint()..color = dark);
+    _rect(canvas, w * .425, h * .445, w * .018, h * .025, shade);
+    _rect(canvas, w * .557, h * .445, w * .018, h * .025, shade);
+
+    // Four minarets with balcony bands and tiny domed caps.
+    for (final x in [w * .315, w * .355, w * .645, w * .685]) {
+      _rect(canvas, x, h * .345, w * .014, h * .19, marble);
+      _rect(canvas, x - w * .006, h * .385, w * .026, h * .008, shade);
+      _rect(canvas, x - w * .006, h * .455, w * .026, h * .008, shade);
+      _rect(canvas, x - w * .006, h * .337, w * .026, h * .012, marble);
+      _rect(canvas, x + w * .004, h * .322, w * .006, h * .016, shade);
+    }
+    // Small chhatris, corner inlay, and a broken reflection in the channel.
+    for (final x in [w * .405, w * .57]) {
+      _rect(canvas, x, h * .375, w * .025, h * .03, marble);
+      canvas.drawOval(
+        ui.Rect.fromLTWH(x, h * .365, w * .025, h * .018),
+        ui.Paint()..color = shade,
+      );
+    }
+    for (var i = 0; i < 5; i++) {
+      _rect(canvas, w * (.39 + i * .045), h * .43, w * .008, h * .008,
+          const ui.Color(0xFFC77962));
+      _rect(canvas, w * (.37 + i * .06), h * .59, w * .03, h * .006,
+          const ui.Color(0xFF85AAB0));
+    }
+  }
+
+  void _drawJaisalmerFort(ui.Canvas canvas, double w, double h) {
+    final sandstone =
+        _storm ? const ui.Color(0xFF9C7657) : const ui.Color(0xFFD29A52);
+    final light = const ui.Color(0xFFE6B96F);
+    final shadow = const ui.Color(0xFF815334);
+    final dark = const ui.Color(0xFF493629);
+
+    // The fort sits on a stepped sandstone hill above the desert town.
+    final hill = ui.Path()
+      ..moveTo(w * .17, h * .59)
+      ..lineTo(w * .24, h * .535)
+      ..lineTo(w * .77, h * .535)
+      ..lineTo(w * .84, h * .59)
+      ..close();
+    canvas.drawPath(hill, ui.Paint()..color = shadow);
+
+    final wall = ui.Path()
+      ..moveTo(w * .22, h * .545)
+      ..lineTo(w * .22, h * .425)
+      ..lineTo(w * .27, h * .425)
+      ..lineTo(w * .27, h * .395)
+      ..lineTo(w * .32, h * .395)
+      ..lineTo(w * .32, h * .42)
+      ..lineTo(w * .40, h * .42)
+      ..lineTo(w * .40, h * .375)
+      ..lineTo(w * .46, h * .375)
+      ..lineTo(w * .46, h * .405)
+      ..lineTo(w * .55, h * .405)
+      ..lineTo(w * .55, h * .37)
+      ..lineTo(w * .62, h * .37)
+      ..lineTo(w * .62, h * .41)
+      ..lineTo(w * .70, h * .41)
+      ..lineTo(w * .70, h * .39)
+      ..lineTo(w * .76, h * .39)
+      ..lineTo(w * .76, h * .545)
+      ..close();
+    canvas.drawPath(wall, ui.Paint()..color = sandstone);
+    _rect(canvas, w * .235, h * .45, w * .50, h * .018, light);
+    _rect(canvas, w * .22, h * .535, w * .54, h * .012, shadow);
+
+    // Rounded bastions, crenellations, and inset slit windows.
+    for (final x in [w * .20, w * .37, w * .53, w * .72]) {
+      _rect(canvas, x, h * .435, w * .075, h * .11, sandstone);
+      canvas.drawOval(
+        ui.Rect.fromLTWH(x, h * .405, w * .075, h * .065),
+        ui.Paint()..color = light,
+      );
+      _rect(canvas, x + w * .014, h * .47, w * .008, h * .025, dark);
+      _rect(canvas, x + w * .052, h * .47, w * .008, h * .025, dark);
+      _rect(canvas, x + w * .006, h * .445, w * .012, h * .01, light);
+      _rect(canvas, x + w * .031, h * .445, w * .012, h * .01, light);
+      _rect(canvas, x + w * .056, h * .445, w * .012, h * .01, light);
+    }
+
+    // A recessed arched gate and tiny clustered havelis inside the walls.
+    _rect(canvas, w * .455, h * .475, w * .09, h * .07, shadow);
+    final gate = ui.Path()
+      ..moveTo(w * .475, h * .545)
+      ..lineTo(w * .475, h * .51)
+      ..quadraticBezierTo(w * .50, h * .475, w * .525, h * .51)
+      ..lineTo(w * .525, h * .545)
+      ..close();
+    canvas.drawPath(gate, ui.Paint()..color = dark);
+    for (var i = 0; i < 3; i++) {
+      final x = w * (.31 + i * .16);
+      _rect(canvas, x, h * .455, w * .055, h * .035, light);
+      _rect(canvas, x + w * .015, h * .44, w * .025, h * .015, sandstone);
+      _rect(canvas, x + w * .022, h * .467, w * .012, h * .023, dark);
+    }
+  }
+
+  void _drawHorizon(ui.Canvas canvas, double w, double h) {
+    final far = _winterWorld
+        ? const ui.Color(0xFF789CAE)
+        : _hot
+            ? const ui.Color(0xFFB77A48)
+            : _storm
+                ? const ui.Color(0xFF203944)
+                : _autumnWorld
+                    ? const ui.Color(0xFF77513A)
+                    : _winterSeason
+                        ? const ui.Color(0xFF625F59)
+                        : const ui.Color(0xFF376B59);
+    final near = _winterWorld
+        ? const ui.Color(0xFFAAC6D1)
+        : _hot
+            ? const ui.Color(0xFFD69A54)
+            : _storm
+                ? const ui.Color(0xFF2C4A4C)
+                : _autumnWorld
+                    ? const ui.Color(0xFF986643)
+                    : _winterSeason
+                        ? const ui.Color(0xFF797365)
+                        : _summerWorld
+                            ? const ui.Color(0xFF54804B)
+                            : const ui.Color(0xFF477A5D);
+    final ridge = ui.Path()
+      ..moveTo(0, h * .57)
+      ..lineTo(w * .12, h * .49)
+      ..lineTo(w * .22, h * .54)
+      ..lineTo(w * .38, h * .465)
+      ..lineTo(w * .53, h * .55)
+      ..lineTo(w * .69, h * .48)
+      ..lineTo(w * .82, h * .53)
+      ..lineTo(w, h * .46)
+      ..lineTo(w, h * .60)
+      ..lineTo(0, h * .60)
+      ..close();
+    canvas.drawPath(ridge, ui.Paint()..color = far);
+    final lowland = ui.Path()
+      ..moveTo(0, h * .59)
+      ..lineTo(w * .18, h * .545)
+      ..lineTo(w * .33, h * .58)
+      ..lineTo(w * .52, h * .535)
+      ..lineTo(w * .71, h * .585)
+      ..lineTo(w * .88, h * .54)
+      ..lineTo(w, h * .57)
+      ..lineTo(w, h * .62)
+      ..lineTo(0, h * .62)
+      ..close();
+    canvas.drawPath(lowland, ui.Paint()..color = near);
+    if (_winterWorld) {
+      final snowLine = ui.Paint()..color = const ui.Color(0xCCECF8FC);
+      for (var i = 0; i < 6; i++) {
+        final x = w * (.12 + i * .14);
+        _rect(canvas, x, h * (.50 + (i % 2) * .025), w * .045, h * .012,
+            snowLine.color);
+      }
+    }
+  }
+
+  void _drawTerrainDetails(ui.Canvas canvas, double w, double h) {
+    if (_hot) {
+      final crack = ui.Paint()
+        ..color = const ui.Color(0x886E452F)
+        ..strokeWidth = math.max(1.0, w * .003)
+        ..style = ui.PaintingStyle.stroke;
+      for (var i = 0; i < 9; i++) {
+        final x = w * (.04 + (i * 29 % 91) / 100);
+        final y = h * (.68 + (i * 17 % 24) / 100);
+        final path = ui.Path()
+          ..moveTo(x, y)
+          ..lineTo(x + w * .018, y + h * .018)
+          ..lineTo(x + w * .009, y + h * .038)
+          ..lineTo(x + w * .034, y + h * .054);
+        canvas.drawPath(path, crack);
+      }
+    } else if (_winterWorld) {
+      for (var i = 0; i < 14; i++) {
+        final x = w * ((i * 31 % 96) / 100);
+        final y = h * (.72 + (i * 13 % 23) / 100);
+        _rect(canvas, x, y, w * (.025 + (i % 3) * .009), h * .008,
+            const ui.Color(0xAAEFFAFF));
+      }
+    } else {
+      final grass = _storm
+          ? const ui.Color(0xFF375651)
+          : _autumnWorld
+              ? const ui.Color(0xFFB27A45)
+              : _springWorld
+                  ? const ui.Color(0xFF78AE62)
+                  : _summerWorld
+                      ? const ui.Color(0xFF5A904F)
+                      : const ui.Color(0xFF6C9B5E);
+      for (var i = 0; i < 24; i++) {
+        final x = w * ((i * 23 % 99) / 100);
+        final y = h * (.67 + (i * 11 % 28) / 100);
+        _rect(canvas, x, y, w * .004, h * (.014 + (i % 3) * .005), grass);
+      }
+      if (_autumnWorld || _springWorld) {
+        for (var i = 0; i < 11; i++) {
+          final x = w * (.04 + (i * 17 % 92) / 100);
+          final y = h * (.73 + (i * 11 % 20) / 100);
+          if (_autumnWorld) {
+            _rect(
+                canvas,
+                x,
+                y,
+                w * .014,
+                h * .009,
+                i.isEven
+                    ? const ui.Color(0xFFD69542)
+                    : const ui.Color(0xFFB65F38));
+            _rect(canvas, x + w * .006, y - h * .004, w * .006, h * .008,
+                const ui.Color(0xFFDFAB58));
+          } else {
+            _rect(canvas, x + w * .005, y, w * .004, h * .025,
+                const ui.Color(0xFF3C8450));
+            _rect(
+                canvas,
+                x,
+                y - h * .006,
+                w * .014,
+                h * .012,
+                i.isEven
+                    ? const ui.Color(0xFFE9B7D2)
+                    : const ui.Color(0xFFFFD58A));
+          }
+        }
+      }
+      // Small stones catch a different shade from the meadow floor.
+      for (var i = 0; i < 8; i++) {
+        final x = w * (.06 + (i * 19 % 90) / 100);
+        final y = h * (.76 + (i * 7 % 18) / 100);
+        _rect(canvas, x, y, w * .018, h * .009,
+            _storm ? const ui.Color(0xFF526A67) : const ui.Color(0xFF52745E));
+      }
+    }
+  }
+
+  /// Detailed, layered rainy-night scene drawn entirely with Flame's canvas.
+  void _drawRainyForest(ui.Canvas canvas, double w, double h) {
+    final unit = math.max(2.0, math.min(w, h) * .018).toDouble();
+    final trunk = isDay && !_storm
+        ? const ui.Color(0xFF69432B)
+        : const ui.Color(0xFF3A241B);
+    final bark = isDay && !_storm
+        ? const ui.Color(0xFF8B5A35)
+        : const ui.Color(0xFF583421);
+    final deepLeaf = _storm
+        ? const ui.Color(0xFF092D2B)
+        : isDay
+            ? const ui.Color(0xFF15523C)
+            : const ui.Color(0xFF104138);
+    final leaf = _storm
+        ? const ui.Color(0xFF10443D)
+        : isDay
+            ? const ui.Color(0xFF24704A)
+            : const ui.Color(0xFF175344);
+
+    // Dark distant tree line and a few scattered canopy gaps.
+    _rect(canvas, 0, h * .60, w, h * .07, const ui.Color(0xFF102C2A));
+    for (var i = 0; i < 10; i++) {
+      final x = w * (i / 10);
+      final treetop = h * (.49 + (i % 3) * .025);
+      _rect(canvas, x, treetop, w * .055, h * .13, deepLeaf);
+      _rect(canvas, x + w * .012, treetop - h * .035, w * .032, h * .055, leaf);
+    }
+
+    // Large foreground tree: blocky trunk, roots, bark cuts, and canopy.
+    _rect(canvas, 0, h * .20, w * .18, h * .66, trunk);
+    _rect(canvas, w * .035, h * .23, w * .018, h * .42, bark);
+    _rect(canvas, w * .105, h * .19, w * .012, h * .51, bark);
+    _rect(canvas, w * .145, h * .31, w * .012, h * .32,
+        const ui.Color(0xFF2C1D18));
+    // A few dark bark knots break the trunk's long flat bands.
+    for (var i = 0; i < 4; i++) {
+      final bx = w * (.045 + (i % 2) * .075);
+      final by = h * (.34 + i * .12);
+      _rect(canvas, bx, by, w * .018, h * .012, const ui.Color(0xFF2A1B16));
+      _rect(canvas, bx + w * .006, by + h * .004, w * .006, h * .004,
+          const ui.Color(0xFF7A4A2E));
+    }
+    _rect(canvas, 0, h * .83, w * .20, h * .045, trunk);
+    _rect(canvas, w * .12, h * .79, w * .10, h * .035, trunk);
+    _rect(canvas, w * .01, h * .17, w * .45, h * .085, deepLeaf);
+    _rect(canvas, w * .055, h * .12, w * .34, h * .065, leaf);
+    _rect(canvas, w * .16, h * .09, w * .28, h * .055, deepLeaf);
+    _rect(canvas, w * .32, h * .14, w * .18, h * .045, leaf);
+    for (var i = 0; i < 13; i++) {
+      final x = w * (.045 + (i * 17 % 46) / 100);
+      final y = h * (.105 + (i * 11 % 11) / 100);
+      _rect(canvas, x, y, unit * (1.4 + (i % 3)), unit * .65,
+          i.isEven ? const ui.Color(0xFF247052) : const ui.Color(0xFF1B604A));
+    }
+
+    // A warm square lantern hangs from the branch and lights nearby rain.
+    final lanternCenter = ui.Offset(w * .407, h * .325);
+    final glowRadius = w * .19;
+    final forestLanternLit = !isDay || _storm;
+    if (forestLanternLit) {
+      canvas.drawCircle(
+        lanternCenter,
+        glowRadius,
+        ui.Paint()
+          ..shader = ui.Gradient.radial(
+            lanternCenter,
+            glowRadius,
+            const [ui.Color(0x55FFCB67), ui.Color(0x00FFCB67)],
+          ),
+      );
+      _rect(canvas, w * .30, h * .51, w * .23, h * .018,
+          const ui.Color(0x229F9A63));
+    }
+    _rect(canvas, w * .405, h * .18, unit * .8, h * .09,
+        const ui.Color(0xFF32251E));
+    _rect(canvas, w * .375, h * .265, w * .065, h * .12,
+        const ui.Color(0xFF30251F));
+    _rect(
+        canvas,
+        w * .39,
+        h * .28,
+        w * .035,
+        h * .085,
+        forestLanternLit
+            ? const ui.Color(0xFFFFB83F)
+            : const ui.Color(0xFF79543A));
+    _rect(
+        canvas,
+        w * .398,
+        h * .294,
+        w * .018,
+        h * .052,
+        forestLanternLit
+            ? const ui.Color(0xFFFFE48A)
+            : const ui.Color(0xFF9C7545));
+    _rect(canvas, w * .388, h * .278, w * .04, h * .008,
+        const ui.Color(0xFFFFD77B));
+    _rect(canvas, w * .367, h * .37, w * .082, h * .015,
+        const ui.Color(0x664D596D));
+    _rect(canvas, w * .35, h * .39, w * .12, h * .012,
+        const ui.Color(0x553C4B65));
+    // Tiny fireflies around the lantern.
+    for (var i = 0; forestLanternLit && i < 5; i++) {
+      final fx = w * (.28 + i * .11);
+      final fy = h * (.34 + (i % 3) * .12);
+      _rect(canvas, fx, fy, unit * .48, unit * .48, const ui.Color(0xFFFFD96A));
+    }
+
+    // Rustic fence behind the character, with square posts and rails.
+    final fence = const ui.Color(0xFF573A27);
+    for (var i = 0; i < 5; i++) {
+      final x = w * (.62 + i * .085);
+      _rect(canvas, x, h * .66, w * .022, h * .19, fence);
+      _rect(canvas, x + w * .004, h * .66, w * .014, h * .012,
+          const ui.Color(0xFF795338));
+    }
+    _rect(canvas, w * .60, h * .70, w * .40, h * .035, fence);
+    _rect(canvas, w * .60, h * .79, w * .40, h * .035, fence);
+    _rect(canvas, w * .60, h * .70, w * .40, h * .009,
+        const ui.Color(0xFF80583A));
+
+    // Pond in the near foreground, with stepped bank and animated rain rings.
+    _rect(canvas, w * .40, h * .845, w * .60, h * .155,
+        isDay ? const ui.Color(0xFF245A80) : const ui.Color(0xFF173A68));
+    _rect(canvas, w * .40, h * .845, w * .60, h * .015,
+        const ui.Color(0xFF437B9B));
+    _rect(canvas, w * .40, h * .86, w * .60, h * .012,
+        const ui.Color(0xFF285487));
+    for (var i = 0; i < 5; i++) {
+      final x = w * (.45 + i * .105);
+      final y = h * (.90 + (i % 3) * .027);
+      final ring = ui.Rect.fromCenter(
+        center: ui.Offset(x, y),
+        width: w * (.055 + .018 * math.sin(_elapsed * 2 + i)),
+        height: h * .012,
+      );
+      canvas.drawOval(
+          ring,
+          ui.Paint()
+            ..color = const ui.Color(0x884F9BD0)
+            ..style = ui.PaintingStyle.stroke
+            ..strokeWidth = 1.2);
+    }
+    for (var i = 0; i < 8; i++) {
+      _rect(
+          canvas,
+          w * (.44 + (i * 13 % 53) / 100),
+          h * (.88 + (i * 7 % 10) / 100),
+          w * .055,
+          unit * .45,
+          i.isEven ? const ui.Color(0xFF35699A) : const ui.Color(0xFF284F83));
+    }
+
+    // Flowers and a tiny red mushroom add foreground color and scale.
+    for (var i = 0; i < 3; i++) {
+      final x = w * (.20 + i * .035);
+      final y = h * .88;
+      _rect(
+          canvas, x + unit, y, unit * .55, h * .07, const ui.Color(0xFF28784E));
+      _rect(canvas, x, y - unit, unit * 1.2, unit * 1.1,
+          i == 1 ? const ui.Color(0xFFB77CFF) : const ui.Color(0xFFD17DFF));
+      _rect(canvas, x + unit * .3, y - unit * .7, unit * .35, unit * .4,
+          const ui.Color(0xFFEBCBFF));
+    }
+    final mx = w * .75;
+    final my = h * .82;
+    _rect(canvas, mx + unit * .7, my, unit * 1.1, unit * 2.3,
+        const ui.Color(0xFFFFE7C5));
+    _rect(canvas, mx, my - unit, unit * 2.6, unit * 1.2,
+        const ui.Color(0xFFD84445));
+    _rect(canvas, mx + unit * .55, my - unit * .55, unit * .45, unit * .35,
+        const ui.Color(0xFFFFF0DB));
+  }
+
+  void _drawWeatherParticles(ui.Canvas canvas, double w, double h) {
+    if (_sandstorm) {
+      final sand = ui.Paint()
+        ..color = const ui.Color(0xD8F0B36F)
+        ..strokeWidth = 1.4;
+      final flowX = -math.sin(windDirectionDeg * math.pi / 180);
+      final count = reduceMotion ? 54 : 90;
+      for (var i = 0; i < count; i++) {
+        final x = (i * 31.0 +
+                _elapsed *
+                    _environmentMotionScale *
+                    (flowX * 95 + 90 + i % 5 * 18)) %
+            w;
+        final y =
+            (i * 17.0 + _elapsed * _environmentMotionScale * (22 + i % 7 * 5)) %
+                h;
+        canvas.drawLine(
+            ui.Offset(x, y), ui.Offset(x - w * .025, y + h * .004), sand);
+      }
+      return;
+    }
+    if (_heatStress || _sunBeamActive) {
+      for (var i = 0; i < 9; i++) {
+        final x = w * (.30 + i * .075);
+        final y = h *
+            (.63 + .025 * math.sin(_elapsed * _environmentMotionScale * 2 + i));
+        canvas.drawLine(
+            ui.Offset(x, y),
+            ui.Offset(x + 3, y - h * .08),
+            ui.Paint()
+              ..color = const ui.Color(0x55FFF0B0)
+              ..strokeWidth = 2);
+      }
+    }
+    if (_windy) {
+      final p = ui.Paint()
+        ..color =
+            _sandstorm ? const ui.Color(0x99EBC08A) : const ui.Color(0x99E2F5FF)
+        ..strokeWidth = 1.5;
+      final direction = math.cos(windDirectionDeg * math.pi / 180);
+      final count = reduceMotion ? 7 : 13;
+      for (var i = 0; i < count; i++) {
+        final x = (i * w / count +
+                _elapsed * _environmentMotionScale * _wind * 1.5 * direction) %
+            w;
+        final y = h * (.28 + (i % 6) * .085);
+        canvas.drawLine(
+            ui.Offset(x, y),
+            ui.Offset(x + w * .075 * (direction.sign == 0 ? 1 : direction.sign),
+                y - 2),
+            p);
+      }
+    }
+    if (_rain || _snow) {
+      final rainAlpha = (115 + 105 * _rainIntensity).round().clamp(0, 220);
+      final p = ui.Paint()
+        ..color = _snow
+            ? const ui.Color(0xFFEAF9FF)
+            : ui.Color.fromARGB(rainAlpha, 126, 223, 255)
+        ..strokeWidth = _snow ? 1.1 : 1 + _rainIntensity * .7;
+      final particleCount = _snow
+          ? ([75, 86].contains(weatherCode) ? 56 : 30)
+          : _lightRain
+              ? (14 + (_rainIntensity * 30).round()).clamp(14, 40)
+              : (24 + (_rainIntensity * 48).round()).clamp(24, 72);
+      final reducedCount =
+          reduceMotion ? (particleCount * .62).round() : particleCount;
+      final fallSpeed =
+          (_snow ? 34.0 : 85 + _rainIntensity * 115) * _environmentMotionScale;
+      final windSlant = -math.sin(windDirectionDeg * math.pi / 180) *
+          (_wind / 160).clamp(0.0, .9) *
+          w *
+          .035;
+      for (var i = 0; i < reducedCount; i++) {
+        final x = (i * 41.0 +
+                _elapsed * _environmentMotionScale * (windSlant * 12 + 12)) %
+            w;
+        final y = (i * 29.0 + _elapsed * fallSpeed) % h;
+        if (_snow) {
+          _rect(canvas, x, y, 2.5, 2.5, const ui.Color(0xFFEAF9FF));
+        } else {
+          canvas.drawLine(ui.Offset(x, y),
+              ui.Offset(x + windSlant, y + 6 + _rainIntensity * 5), p);
+        }
+      }
+    }
+    if (_fog) {
+      for (var i = 0; i < 5; i++) {
+        final y = h * (.25 + i * .13);
+        final x =
+            ((_elapsed * _environmentMotionScale * 12 + i * 71) % (w + 100)) -
+                100;
+        _rect(canvas, x, y, w * .62, h * .035, const ui.Color(0x44E5F0F4));
+      }
+    }
+  }
+
+  void _drawWetGround(ui.Canvas canvas, double w, double h) {
+    final sheen = 18 + (_rainIntensity * 30).round();
+    _rect(
+        canvas, 0, h * .91, w, h * .09, ui.Color.fromARGB(sheen, 84, 152, 176));
+    for (var i = 0; i < 9; i++) {
+      final x = w * ((i * 23 % 97) / 100);
+      final y = h * (.77 + (i * 13 % 16) / 100);
+      final radius = w * (.008 + (i % 3) * .003);
+      final age = (_elapsed * _environmentMotionScale * (1.2 + _rainIntensity) +
+              i * .37) %
+          1;
+      canvas.drawOval(
+        ui.Rect.fromCenter(
+            center: ui.Offset(x, y),
+            width: radius * (1 + age * 2),
+            height: radius * (.35 + age * .3)),
+        ui.Paint()
+          ..color = const ui.Color(0x885DB8CE).withOpacity((1 - age) * .42)
+          ..style = ui.PaintingStyle.stroke
+          ..strokeWidth = .8,
+      );
+    }
+  }
+
+  void _drawGoblin(ui.Canvas canvas, double w, double h,
+      {required double x, required double floor}) {
+    final hit = _hitRecovery > 0 && _directHit;
+    final chatting = _dialogueAge > 0;
+    final behavior = _behavior.state;
+    final poseState = behavior == GoblinBehaviorState.recover
+        ? _behavior.previousState
+        : behavior;
+    final poseTarget = behavior == GoblinBehaviorState.recover
+        ? _behavior.previousTarget
+        : _behavior.actionTarget;
+    final rawActionBlend = behavior == GoblinBehaviorState.recover
+        ? 1 - _behavior.actionProgress
+        : behavior == GoblinBehaviorState.idle
+            ? 0.0
+            : (_behavior.stateAge / .28).clamp(0.0, 1.0).toDouble();
+    final actionBlend =
+        rawActionBlend * rawActionBlend * (3 - 2 * rawActionBlend);
+    final sleeping =
+        poseState == GoblinBehaviorState.sleep && actionBlend > .72;
+    final resting = poseState == GoblinBehaviorState.rest;
+    final stretching = resting && poseTarget == 'stretch';
+    final scratching =
+        poseState == GoblinBehaviorState.lookAround && poseTarget == 'scratch';
+    final yawning = poseState == GoblinBehaviorState.yawn;
+    final waving = poseState == GoblinBehaviorState.interact ||
+        poseState == GoblinBehaviorState.play;
+    final sitBlend =
+        (resting || poseState == GoblinBehaviorState.sleep) ? actionBlend : 0.0;
+    final nearMiss = _strikeAge < .42 && !_directHit && _thunderstorm;
+    final unit = math.max(2.0, math.min(w, h) * .014).toDouble();
+    final motionScale = reduceFlashing || reduceMotion ? .55 : 1.0;
+    final stride = _walking && !hit
+        ? math.sin(_behavior.stateAge * _strideSpeed) * motionScale
+        : 0.0;
+    final shiver = _cold ? math.sin(_elapsed * 7.5) * .65 * motionScale : 0.0;
+    final gustLean =
+        _windy ? (math.min(_wind / 160, .22) * 18).toDouble() : 0.0;
+    x += shiver + gustLean;
+    final breathing = math.sin(_elapsed * 2.1) * unit * .22;
+    // The body stays mostly level; alternating feet and arm swings carry the walk.
+    final leftLegSwing = stride * unit * 1.2;
+    final rightLegSwing = -stride * unit * 1.2;
+    final leftFootLift = math.max(0.0, stride) * unit * 1.2;
+    final rightFootLift = math.max(0.0, -stride) * unit * 1.2;
+    final paddling = _flood && _elapsed >= 4.5;
+    final wipingBrow =
+        (_heatStress || _sunBeamActive) && !_walking && _elapsed % 3 < .7;
+    final heatProgress = _sunBeamActive
+        ? _sunHeatProgress
+        : _heatStress
+            ? ((temperatureC - strongHeatThresholdC) /
+                    (extremeHeatThresholdC - strongHeatThresholdC) *
+                    .42)
+                .clamp(0.0, .42)
+                .toDouble()
+            : 0.0;
+    final bodyColor = hit
+        ? const ui.Color(0xFF34363B)
+        : (_sunBeamActive || _heatStress)
+            ? ui.Color.lerp(const ui.Color(0xFF315C48),
+                const ui.Color(0xFFC94E43), heatProgress)!
+            : const ui.Color(0xFF315C48);
+    final hoodColor = hit
+        ? const ui.Color(0xFF292C32)
+        : (_sunBeamActive || _heatStress)
+            ? ui.Color.lerp(const ui.Color(0xFF247D61),
+                const ui.Color(0xFFB9413B), heatProgress)!
+            : const ui.Color(0xFF247D61);
+    final skin = hit
+        ? const ui.Color(0xFF9AA18B)
+        : (_heatStress || _sunBeamActive)
+            ? ui.Color.lerp(const ui.Color(0xFF83C879),
+                const ui.Color(0xFFE77C68), heatProgress)!
+            : _cold
+                ? const ui.Color(0xFF86C5E7)
+                : const ui.Color(0xFF83C879);
+
+    // Ground shadow moves and tightens on a direct lightning hit.
+    canvas.drawOval(
+      ui.Rect.fromCenter(
+          center: ui.Offset(x, floor + unit * .8),
+          width: hit ? unit * 8 : unit * 11,
+          height: unit * 1.5),
+      ui.Paint()..color = const ui.Color(0x88030A0B),
+    );
+
+    // Blend standing and seated leg placements to avoid a pose snap.
+    _rect(
+        canvas,
+        x + unit * ui.lerpDouble(-3.2 + leftLegSwing / unit, -3.5, sitBlend)!,
+        floor - unit * ui.lerpDouble(7, 5.5, sitBlend)!,
+        unit * ui.lerpDouble(2.4, 3, sitBlend)!,
+        unit * 4.5,
+        const ui.Color(0xFF28483D));
+    _rect(
+        canvas,
+        x + unit * ui.lerpDouble(.8 + rightLegSwing / unit, .5, sitBlend)!,
+        floor - unit * ui.lerpDouble(7, 5.5, sitBlend)!,
+        unit * ui.lerpDouble(2.4, 3, sitBlend)!,
+        unit * 4.5,
+        const ui.Color(0xFF28483D));
+    _rect(
+        canvas,
+        x + unit * ui.lerpDouble(-4 + leftLegSwing / unit, -5.5, sitBlend)!,
+        floor - unit * ui.lerpDouble(3 + leftFootLift / unit, 2, sitBlend)!,
+        unit * ui.lerpDouble(3, 4.5, sitBlend)!,
+        unit * ui.lerpDouble(3, 2, sitBlend)!,
+        const ui.Color(0xFF513C34));
+    _rect(
+        canvas,
+        x + unit * ui.lerpDouble(1 + rightLegSwing / unit, 1, sitBlend)!,
+        floor - unit * ui.lerpDouble(3 + rightFootLift / unit, 2, sitBlend)!,
+        unit * ui.lerpDouble(3, 4.5, sitBlend)!,
+        unit * ui.lerpDouble(3, 2, sitBlend)!,
+        const ui.Color(0xFF513C34));
+    _rect(canvas, x - unit * 4, floor - unit * 12 - breathing, unit * 8,
+        unit * 9, bodyColor);
+    final armSwing = stride * unit * 1.4;
+    final leftArmY = floor - unit * (11 + (stretching ? 8 * actionBlend : 0));
+    final rightRaise = scratching || waving || yawning ? actionBlend : 0.0;
+    final rightArmY =
+        floor - unit * (11 + (stretching ? 8 * actionBlend : 7 * rightRaise));
+    _rect(canvas, x - unit * 6 - armSwing, leftArmY, unit * 2,
+        unit * (6 + (stretching ? 2 * actionBlend : 0)), skin);
+    _rect(canvas, x + unit * 4 + armSwing, rightArmY, unit * 2,
+        unit * (6 + 2 * rightRaise + (stretching ? 2 * actionBlend : 0)), skin);
+
+    // Hood silhouette and pointed tips.
+    final headPivot = ui.Offset(x, floor - unit * 17.5);
+    canvas.save();
+    canvas.translate(headPivot.dx, headPivot.dy);
+    canvas.rotate(_behavior.headTurn *
+        actionBlend *
+        (reduceFlashing ? .55 : 1) *
+        (reduceMotion ? .45 : 1));
+    canvas.translate(-headPivot.dx, -headPivot.dy);
+    _rect(canvas, x - unit * 5, floor - unit * 23, unit * 10, unit * 11,
+        hoodColor);
+    _rect(canvas, x - unit * 6, floor - unit * 21, unit * 12, unit * 7,
+        hoodColor);
+    _rect(
+        canvas, x - unit * 5, floor - unit * 25, unit * 3, unit * 5, hoodColor);
+    _rect(
+        canvas, x + unit * 2, floor - unit * 25, unit * 3, unit * 5, hoodColor);
+    _rect(canvas, x - unit * 3, floor - unit * 20 + breathing, unit * 6,
+        unit * 7, skin);
+
+    // Face, expressive eyes and mouth.
+    final eyeY = floor - unit * (hit || sleeping ? 17 : 16);
+    final eyeHeight =
+        sleeping || _behavior.blinkAmount > .5 ? unit * .42 : unit * 2.2;
+    final eyeShiftX = _behavior.gazeX * actionBlend * unit * .42;
+    final eyeShiftY = _behavior.gazeY * actionBlend * unit * .30;
+    _rect(canvas, x - unit * 2.5, eyeY, unit * 1.6, eyeHeight,
+        const ui.Color(0xFFF7F5D9));
+    _rect(canvas, x + unit * .8, eyeY, unit * 1.6, eyeHeight,
+        const ui.Color(0xFFF7F5D9));
+    if (!sleeping && _behavior.blinkAmount <= .5) {
+      _rect(canvas, x - unit * 1.8 + eyeShiftX, eyeY + unit * .5 + eyeShiftY,
+          unit * .8, unit * 1.4, const ui.Color(0xFF202B2B));
+      _rect(canvas, x + unit * 1.5 + eyeShiftX, eyeY + unit * .5 + eyeShiftY,
+          unit * .8, unit * 1.4, const ui.Color(0xFF202B2B));
+    }
+    final mouthY = floor - unit * 13.5;
+    final openMouth = yawning ||
+        _behavior.mood == GoblinMood.surprised ||
+        (_behavior.mood == GoblinMood.worried &&
+            _behavior.state == GoblinBehaviorState.weatherReact);
+    if (openMouth) {
+      canvas.drawOval(
+          ui.Rect.fromCenter(
+              center: ui.Offset(x, mouthY),
+              width: unit * (yawning ? 2.5 : 2),
+              height: unit * (yawning ? 2.8 : 2)),
+          ui.Paint()..color = const ui.Color(0xFF263238));
+      if (yawning) {
+        _rect(canvas, x + unit * 4.2, floor - unit * 17, unit * 1.8, unit * 2,
+            const ui.Color(0xFFFFF1A8));
+      }
+    } else if (_behavior.mood == GoblinMood.happy ||
+        _behavior.mood == GoblinMood.playful) {
+      final smile = ui.Path()
+        ..moveTo(x - unit, mouthY)
+        ..quadraticBezierTo(x, mouthY + unit * 1.5, x + unit * 1.7, mouthY);
+      canvas.drawPath(
+          smile,
+          ui.Paint()
+            ..color = const ui.Color(0xFF263238)
+            ..style = ui.PaintingStyle.stroke
+            ..strokeWidth = unit * .55);
+    } else {
+      _rect(canvas, x - unit, mouthY, unit * (chatting ? 3 : 2), unit * .8,
+          hit ? const ui.Color(0xFF171717) : const ui.Color(0xFF356044));
+    }
+    canvas.restore();
+    if (chatting) {
+      final wave = .5 + .5 * math.sin(_elapsed * 12);
+      _rect(
+          canvas, x + unit * 4.5, floor - unit * 15, unit * 2, unit * 4, skin);
+      _rect(canvas, x + unit * 5, floor - unit * (18 + wave), unit * 2.5,
+          unit * 2, skin);
+    }
+
+    if (wipingBrow) {
+      _rect(canvas, x + unit * 2, floor - unit * 19, unit * 5, unit * 2, skin);
+      _rect(canvas, x + unit * 5, floor - unit * 18, unit * 2, unit * 2,
+          const ui.Color(0xFF73E4FF));
+    }
+    if (scratching) {
+      _rect(canvas, x + unit * 2.2, floor - unit * 20, unit * 3.2, unit * 2,
+          skin);
+    }
+    if (_behavior.state == GoblinBehaviorState.weatherReact &&
+        _behavior.actionTarget == 'snow') {
+      _rect(canvas, x + unit * 6, floor - unit * 18, unit * 4.5, unit, skin);
+      final flakeX = x + unit * (9 + math.sin(_elapsed * 1.3) * 1.5);
+      final flakeY = floor - unit * (20 + math.sin(_elapsed * 1.6) * .8);
+      _rect(canvas, flakeX, flakeY, unit, unit, const ui.Color(0xFFE8FAFF));
+    }
+    if (_rain && _walking && stride > .7) {
+      final splashY = floor - unit * .5;
+      _rect(canvas, x - unit * 7, splashY, unit * 2, unit,
+          const ui.Color(0xAA9BC9D7));
+      _rect(canvas, x + unit * 5, splashY - unit, unit * 2, unit,
+          const ui.Color(0xAA9BC9D7));
+    }
+    if (paddling) {
+      final paddleAngle = math.sin(_elapsed * 3.2) * .48;
+      canvas.save();
+      canvas.translate(x + unit * 6, floor - unit * 9);
+      canvas.rotate(paddleAngle);
+      canvas.drawLine(
+          const ui.Offset(0, 0),
+          ui.Offset(unit * 11, unit * 8),
+          ui.Paint()
+            ..color = const ui.Color(0xFF79543A)
+            ..strokeWidth = unit * 1.3);
+      _rect(canvas, unit * 8, unit * 6, unit * 4, unit * 2,
+          const ui.Color(0xFFB07A42));
+      canvas.restore();
+    }
+
+    // Lantern on the goblin's left side; its glow warms the nearby ground.
+    final lantern = ui.Offset(x - unit * 7, floor - unit * 9);
+    final lanternLit =
+        !_desertHeat && !_sandstorm && (!isDay || _storm || _fog || nearMiss);
+    if (lanternLit) {
+      final glowR =
+          unit * (nearMiss ? 10 : 7) * (0.92 + .08 * math.sin(_elapsed * 4));
+      canvas.drawCircle(
+          lantern,
+          glowR,
+          ui.Paint()
+            ..shader = ui.Gradient.radial(
+              lantern,
+              glowR,
+              const [ui.Color(0x66FFD16B), ui.Color(0x00FF9D36)],
+            ));
+    }
+    _rect(
+        canvas,
+        lantern.dx - unit,
+        lantern.dy - unit * 1.5,
+        unit * 2,
+        unit * 3,
+        lanternLit ? const ui.Color(0xFFFFC857) : const ui.Color(0xFF79543A));
+    _rect(canvas, lantern.dx - unit * .5, lantern.dy - unit, unit, unit * 2,
+        lanternLit ? const ui.Color(0xFFFFF1A8) : const ui.Color(0xFFB08A56));
+
+    if (_heatStress || _sunBeamActive) {
+      // Sweat droplets intensify as temperatures rise.
+      final sweatCount = heatProgress > .35 ? 4 : 2;
+      for (var i = 0; i < sweatCount; i++) {
+        final sx = x + unit * (4 + i * 1.4);
+        final sy = floor - unit * (18 - ((_elapsed * 5 + i * 3) % 8));
+        _rect(
+            canvas, sx, sy, unit * .8, unit * 1.4, const ui.Color(0xFF73E4FF));
+      }
+      if (heatProgress > .65) {
+        for (var i = 0; i < 3; i++) {
+          final sx = x + unit * (5 + i * 2);
+          canvas.drawLine(
+              ui.Offset(sx, floor - unit * 25),
+              ui.Offset(sx + unit, floor - unit * 28),
+              ui.Paint()
+                ..color = const ui.Color(0x77FFF1C4)
+                ..strokeWidth = 1.5);
+        }
+      }
+    }
+    if (_cold) {
+      // A wrapped scarf, mittens, pink cheeks, and visible breath sell the cold.
+      _rect(canvas, x - unit * 4.5, floor - unit * 12.5, unit * 9, unit * 2.2,
+          const ui.Color(0xFF8A5362));
+      _rect(canvas, x - unit * 6.5, floor - unit * 9, unit * 2.2, unit * 2,
+          const ui.Color(0xFF6B4852));
+      _rect(canvas, x + unit * 4.3, floor - unit * 9, unit * 2.2, unit * 2,
+          const ui.Color(0xFF6B4852));
+      _rect(canvas, x - unit * 3.3, floor - unit * 14, unit, unit,
+          const ui.Color(0xFFB97180));
+      _rect(canvas, x + unit * 2.2, floor - unit * 14, unit, unit,
+          const ui.Color(0xFFB97180));
+      final breathPhase = _elapsed % 2.8;
+      if (breathPhase < 1.5) {
+        final opacity = ((1 - breathPhase / 1.5) * 90).round().clamp(0, 90);
+        final breathColor = ui.Color.fromARGB(opacity, 227, 245, 250);
+        final bx = x + unit * (7 + breathPhase * 2.5);
+        final by = floor - unit * (17 + breathPhase * 2.2);
+        canvas.drawCircle(
+            ui.Offset(bx, by), unit * 1.8, ui.Paint()..color = breathColor);
+        canvas.drawCircle(ui.Offset(bx + unit * 2.1, by - unit * .8),
+            unit * 1.2, ui.Paint()..color = breathColor);
+      }
+    }
+    if (_windy) {
+      // Scarf/hood tail points away from the wind direction.
+      _rect(
+          canvas,
+          x - unit * (7 + math.min(_wind / 15, 7).toDouble()),
+          floor - unit * 19,
+          unit * math.min(_wind / 15, 7).toDouble(),
+          unit * 2,
+          _sandstorm ? const ui.Color(0xFFB94F2D) : const ui.Color(0xFFE6A34A));
+    }
+    if (_sandstorm) {
+      // Broad goggles and a wrapped scarf protect him from blowing sand.
+      _rect(canvas, x - unit * 3.2, floor - unit * 17.5, unit * 6.8, unit * 2.4,
+          const ui.Color(0xFF342D2A));
+      _rect(canvas, x - unit * 2.6, floor - unit * 17.1, unit * 2.1,
+          unit * 1.35, const ui.Color(0xFF8AD4D4));
+      _rect(canvas, x + unit * .4, floor - unit * 17.1, unit * 2.1, unit * 1.35,
+          const ui.Color(0xFF8AD4D4));
+      _rect(canvas, x - unit * 4.4, floor - unit * 11, unit * 8.8, unit * 2.2,
+          const ui.Color(0xFFC65B32));
+    }
+    if ((_desertHeat && _elapsed >= 8) ||
+        (_sunBeamActive && _sunExposure >= 8 && temperatureC >= 36)) {
+      final dizzy = .5 + .5 * math.sin(_elapsed * 5);
+      for (var i = 0; i < 3; i++) {
+        final angle = _elapsed * 2 + i * math.pi * 2 / 3;
+        _rect(
+            canvas,
+            x + math.cos(angle) * unit * 8,
+            floor - unit * 29 + math.sin(angle) * unit * 2,
+            unit * dizzy,
+            unit * dizzy,
+            const ui.Color(0xFFFFF1A8));
+      }
+      for (var i = 0; i < 3; i++) {
+        final sx = x + unit * (i * 2 - 2);
+        final sy = floor - unit * (25 + ((_elapsed * 7 + i * 4) % 10));
+        canvas.drawCircle(ui.Offset(sx, sy), unit * 1.2,
+            ui.Paint()..color = const ui.Color(0x55FFF5DD));
+      }
+    }
+    if (hit) {
+      // Frazzled silhouette and soot pixels after a direct strike.
+      for (var i = 0; i < 5; i++) {
+        _rect(
+            canvas,
+            x + unit * (-5 + i * 2.2),
+            floor - unit * (27 + (i.isEven ? 2 : 0)),
+            unit * 1.5,
+            unit * 3,
+            const ui.Color(0xFF202126));
+      }
+      for (var i = 0; i < 7; i++) {
+        _rect(
+            canvas,
+            x + unit * (-6 + (i * 7 % 13)),
+            floor - unit * (12 + (i * 5 % 9)),
+            unit,
+            unit,
+            const ui.Color(0xFF202126));
+      }
+      // Smoke puffs rise briefly after impact.
+      for (var i = 0; i < 4; i++) {
+        final sy = floor - unit * (29 + ((_elapsed * 8 + i * 5) % 12));
+        canvas.drawCircle(
+            ui.Offset(x + unit * (i - 2) * 2, sy),
+            unit * (1.3 + i * .15),
+            ui.Paint()..color = const ui.Color(0x557C858B));
+      }
+    }
+  }
+
+  void _drawLightning(ui.Canvas canvas, double w, double h) {
+    if (!_thunderstorm || _strikeAge >= .34) return;
+    final flashStrength = (1 - _strikeAge / .34).clamp(0.0, 1.0);
+    final flashAlpha = reduceFlashing
+        ? (flashStrength * (_directHit ? 24 : 12)).round()
+        : (flashStrength * (_directHit ? 100 : 38)).round();
+    canvas.drawRect(ui.Rect.fromLTWH(0, 0, w, h),
+        ui.Paint()..color = ui.Color.fromARGB(flashAlpha, 238, 249, 255));
+    if (_boltPoints.isEmpty) return;
+    final path = ui.Path()..moveTo(_boltStartX, 0);
+    for (final p in _boltPoints) {
+      path.lineTo(p.dx, p.dy);
+    }
+    canvas.drawPath(
+        path,
+        ui.Paint()
+          ..color = _boltColor
+          ..strokeWidth = math.max(2.0, w * .008).toDouble()
+          ..style = ui.PaintingStyle.stroke
+          ..strokeJoin = ui.StrokeJoin.miter);
+    // Each strike keeps its own randomized branches throughout the flash.
+    final branchPaint = ui.Paint()
+      ..color = const ui.Color(0xFFDDF9FF)
+      ..strokeWidth = math.max(1.0, w * .0035).toDouble()
+      ..style = ui.PaintingStyle.stroke;
+    for (var i = 0; i < _branchStarts.length; i++) {
+      final branch = ui.Path()
+        ..moveTo(_branchStarts[i].dx, _branchStarts[i].dy)
+        ..lineTo(_branchKnees[i].dx, _branchKnees[i].dy)
+        ..lineTo(_branchTips[i].dx, _branchTips[i].dy);
+      canvas.drawPath(branch, branchPaint);
+    }
+    if (_directHit) {
+      canvas.drawCircle(
+          ui.Offset(_boltTargetX, _boltTargetY),
+          w * .12,
+          ui.Paint()
+            ..color =
+                ui.Color.fromARGB((flashStrength * 45).round(), 255, 255, 255));
+    }
+  }
+
+  void _rect(ui.Canvas canvas, double x, double y, double width, double height,
+      ui.Color color) {
+    canvas.drawRect(
+        ui.Rect.fromLTWH(x, y, width, height), ui.Paint()..color = color);
+  }
+
+  void _cloud(
+      ui.Canvas canvas, double x, double y, double width, ui.Color color) {
+    final unit = width / 6;
+    _rect(canvas, x + unit, y, unit * 3, unit, color);
+    _rect(canvas, x, y + unit, unit * 6, unit * 1.25, color);
+    _rect(canvas, x + unit, y + unit * 2, unit * 4, unit * .6, color);
+  }
+}
