@@ -6,6 +6,7 @@ import 'widgets/weather_error_view.dart';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 import 'weather_scene.dart';
 import 'goblin_sprites.dart';
 import 'weather_models.dart';
@@ -2267,8 +2268,9 @@ Text(
     // A place saved before coordinates were stored has nothing usable to query,
     // so resolve it through the geocoder once and keep the result.
     if (!hasCoordinates) {
-      final result = await _geocode(
+      final matches = await _searchCities(
           place.subtitle.isEmpty ? place.city : '${place.city}, ${place.region}');
+      final result = matches.isEmpty ? null : matches.first;
       if (!mounted || result == null) return;
       setState(() {
         _city = result.city;

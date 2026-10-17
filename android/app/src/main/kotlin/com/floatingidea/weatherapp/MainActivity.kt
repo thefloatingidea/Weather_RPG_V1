@@ -1,4 +1,4 @@
-package com.example.weather_rpg
+package com.floatingidea.weatherapp
 
 import io.flutter.embedding.android.FlutterActivity
 

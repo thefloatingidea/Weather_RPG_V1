@@ -1,4 +1,3 @@
-import 'package:flutter/material.dart';
 export 'widgets/city_search_page.dart';
 
 /// Weather normalized to the app's internal shape from WeatherAPI.com.
@@ -175,7 +174,6 @@ class PlaceResult {
   final double longitude;
 }
 
-export 'widgets/city_search_page.dart';
 
 
 String weatherLabel(int code) {

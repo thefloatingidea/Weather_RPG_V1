@@ -1,0 +1,6 @@
+# Copy to android/key.properties (which is git-ignored) and fill in.
+storePassword=CHANGE_ME
+keyPassword=CHANGE_ME
+keyAlias=upload
+# Path is relative to android/app/, so this points at android/upload-keystore.jks
+storeFile=../upload-keystore.jks
