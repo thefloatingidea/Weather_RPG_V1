@@ -11,6 +11,7 @@ import 'weather_rules.dart';
 import 'character_behavior.dart';
 import 'goblin_sprites.dart';
 import 'goblin_scenarios.dart';
+import 'local_markers.dart';
 
 ui.Color weatherSceneSkyColor({
   required bool isDay,
@@ -380,6 +381,29 @@ class WeatherSceneGame extends FlameGame with TapCallbacks, LongPressCallbacks {
           location.isArid &&
           const [30, 31, 32, 33, 34, 35].contains(weatherCode));
   bool get _live => environment == SceneEnvironment.live;
+
+    LocalMarker? _cachedMarker;
+  String? _cachedMarkerKey;
+
+  /// The local marker for the current city, or null if none applies.
+  ///
+  /// Markers are suppressed when the location has a landmark, so a scene
+  /// never carries two competing focal points.
+  LocalMarker? get _localMarker {
+    if (location.landmark != WorldLandmark.none) return null;
+    final key = '$city|$region';
+    if (_cachedMarkerKey == key) return _cachedMarker;
+    _cachedMarkerKey = key;
+    _cachedMarker = pickLocalMarker(city: city, region: region);
+    return _cachedMarker;
+  }
+
+  /// Lane the marker occupies, as a fraction of scene width.
+  ///
+  /// With no landmark present, the character holds the centre, so the marker
+  /// is pushed to the right.
+  double get _markerLaneX => .74;
+  
   WorldSeason get _season {
     return worldSeasonForMonth(month, latitude);
   }
@@ -642,7 +666,6 @@ class WeatherSceneGame extends FlameGame with TapCallbacks, LongPressCallbacks {
   }
 
   void _configureAmbientLife() {
-    _ambientCreatures.clear();
     _ambientCreatures.clear();
     void add(
       _AmbientKind kind, {
@@ -1024,6 +1047,7 @@ class WeatherSceneGame extends FlameGame with TapCallbacks, LongPressCallbacks {
     final activeScenario = config.scenario;
     if (activeScenario != null) {
       _behavior.reactToScenario(activeScenario);
+    }
     for (final creature in _ambientCreatures) {
       creature.update(dt, _ambientRandom);
     }
@@ -1267,7 +1291,7 @@ class WeatherSceneGame extends FlameGame with TapCallbacks, LongPressCallbacks {
         _cloud(canvas, x, y, cloudWidth, cloudTone);
       }
     }
-
+    _drawAtmosphericDistance(canvas, w, h);
     _rect(canvas, 0, h * .57, w, h * .43, _groundColor);
     // The sea sits behind the near ground so coastal cities read as waterfronts.
     _drawHorizonWater(canvas, w, h);
@@ -1288,6 +1312,7 @@ class WeatherSceneGame extends FlameGame with TapCallbacks, LongPressCallbacks {
                         : const ui.Color(0xFF47765A);
     _rect(canvas, 0, h * .56, w, h * .035, groundEdge);
     _drawHorizon(canvas, w, h);
+    _drawGroundPath(canvas, w, h);
 
     if (location.isArid || _sandstorm) {
       // Low dunes make arid terrain read as desert without inventing a landmark.
@@ -1308,21 +1333,18 @@ class WeatherSceneGame extends FlameGame with TapCallbacks, LongPressCallbacks {
       }
     } else if (location.biome == WorldBiome.temperate ||
         location.biome == WorldBiome.tropical) {
-      for (var i = 0; i < 8; i++) {
-        final x = w * (i / 8) + (i.isEven ? 0 : w * .035);
-        final tree = _winterWorld
-            ? const ui.Color(0xFF547F91)
-            : _autumnWorld
-                ? const ui.Color(0xFF9A5735)
-                : _springWorld
-                    ? const ui.Color(0xFF286F4E)
-                    : _summerWorld
-                        ? const ui.Color(0xFF245B3F)
-                        : _winterSeason
-                            ? const ui.Color(0xFF53615D)
-                            : _storm
-                                ? const ui.Color(0xFF172F3A)
-                                : const ui.Color(0xFF214D42);
+      // Climate-aware tree line drawn at the mid-ground. Species, height and
+      // colour come from the location's climate zone, so a Canadian city gets
+      // pines while a Mediterranean city gets cypresses and a tropical city
+      // gets palms.
+      final seed = worldLocationSeed(location);
+      final rng = math.Random(seed);
+      final species = location.defaultTree;
+      final treeCount = 7 + rng.nextInt(3);
+      for (var i = 0; i < treeCount; i++) {
+        final x = w * (i / treeCount) + (i.isEven ? 0 : w * .035);
+        final treeW = w * (.13 + rng.nextDouble() * .04);
+        final treeH = h * (.21 + rng.nextDouble() * .08);
         final sway = _windy
             ? math.sin(_elapsed * _environmentMotionScale * 3 +
                     i +
@@ -1330,14 +1352,17 @@ class WeatherSceneGame extends FlameGame with TapCallbacks, LongPressCallbacks {
                 w *
                 (.006 + (_wind / 160).clamp(0.0, .06))
             : 0.0;
-        _drawPixelTree(
-            canvas,
-            x + w * .06 + sway,
-            h * .61,
-            w * (.14 + (i % 3) * .012),
-            h * (.23 + (i % 4) * .025),
-            tree,
-            _winterWorld);
+        _drawClimateTree(
+          canvas,
+          x + w * .06 + sway,
+          h * .61,
+          treeW,
+          treeH,
+          species,
+          snowy: _winterWorld,
+          autumn: _autumnWorld,
+          spring: _springWorld,
+        );
       }
     }
 
@@ -1347,12 +1372,17 @@ class WeatherSceneGame extends FlameGame with TapCallbacks, LongPressCallbacks {
     canvas.save();
     canvas.translate(midOffset, 0);
     _drawTerrainDetails(canvas, w, h);
-    if (_cold && !_snow && !_rain) _drawFrostDetails(canvas, w, h);
+    
     if (debugHiddenLayers != DebugSceneLayers.withoutLandmark && debugHiddenLayers != DebugSceneLayers.withoutLandmarkAndCharacter) {
-      _drawCatalogLandmark(canvas, w, h);
+      if (location.landmark != WorldLandmark.none) {
+        _drawCatalogLandmark(canvas, w, h);
+      } else {
+        _drawLocalMarker(canvas, w, h);
+      }
     }
     canvas.restore();
     if (_rain) _drawWetGround(canvas, w, h);
+    _drawFrostDetails(canvas, w, h);
 
     if (_cyclone) {
       _drawCyclone(canvas, w, h);
@@ -1415,6 +1445,7 @@ class WeatherSceneGame extends FlameGame with TapCallbacks, LongPressCallbacks {
       _drawGoblin(canvas, w, h, x: 0, floor: 0);
       canvas.restore();
     }
+     _drawForeground(canvas, w, h);   // <-- add this
     if (_flood) _drawFloodAlert(canvas, w, h, floor, floodProgress);
     _drawLightning(canvas, w, h);
     // Short recovery vignette after a hit; no repeated strobing.
@@ -1431,9 +1462,9 @@ class WeatherSceneGame extends FlameGame with TapCallbacks, LongPressCallbacks {
           .clamp(18, 48)
           .toInt();
       final mist = ui.Color.fromARGB(alpha, 179, 202, 207);
-      _rect(canvas, 0, h * .24, w, h * .10, mist.withOpacity(.28));
-      _rect(canvas, 0, h * .50, w, h * .10, mist.withOpacity(.42));
-      _rect(canvas, 0, h * .76, w, h * .07, mist.withOpacity(.34));
+      _rect(canvas, 0, h * .24, w, h * .10, mist.withValues(alpha: .28));
+      _rect(canvas, 0, h * .50, w, h * .10, mist.withValues(alpha: .42));
+      _rect(canvas, 0, h * .76, w, h * .07, mist.withValues(alpha: .34));
     }
     _drawSpeechBubble(canvas, w, h);
     // A small pixel prompt makes the scene discoverable and testable.
@@ -1773,6 +1804,252 @@ class WeatherSceneGame extends FlameGame with TapCallbacks, LongPressCallbacks {
     }
   }
 
+  // ───────────────────────────────────────────────────────────────────────────
+  // Climate-aware tree drawing
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /// Dispatches to the right tree silhouette for a climate zone. Different
+  /// zones produce visibly different vegetation so two temperate towns do not
+  /// render identically.
+  void _drawClimateTree(
+    ui.Canvas canvas,
+    double centerX,
+    double baseY,
+    double width,
+    double height,
+    TreeSpecies species, {
+    bool snowy = false,
+    bool autumn = false,
+    bool spring = false,
+  }) {
+    switch (species) {
+      case TreeSpecies.broadleaf:
+        _drawPixelTree(canvas, centerX, baseY, width, height,
+            autumn
+                ? const ui.Color(0xFF9A5735)
+                : spring
+                    ? const ui.Color(0xFF286F4E)
+                    : const ui.Color(0xFF245B3F),
+            snowy);
+      case TreeSpecies.pine:
+        _drawPixelTree(canvas, centerX, baseY, width, height,
+            snowy ? const ui.Color(0xFF547F91) : const ui.Color(0xFF245239),
+            true);
+      case TreeSpecies.palm:
+        _drawPalm(canvas, centerX, baseY, width, height);
+      case TreeSpecies.cypress:
+        _drawCypress(canvas, centerX, baseY, width, height);
+      case TreeSpecies.cactus:
+        _drawCactus(canvas, centerX, baseY, width, height);
+      case TreeSpecies.shrub:
+        _drawShrub(canvas, centerX, baseY, width, height, snowy);
+      case TreeSpecies.baobab:
+        _drawBaobab(canvas, centerX, baseY, width, height);
+    }
+  }
+
+  void _drawPalm(ui.Canvas canvas, double centerX, double baseY,
+      double width, double height) {
+    const trunk = ui.Color(0xFF6B4930);
+    const trunkDark = ui.Color(0xFF4C3421);
+    const frond = ui.Color(0xFF1F6B3A);
+    const frondLit = ui.Color(0xFF3E9256);
+
+    final trunkW = math.max(1.5, width * 0.075);
+    final trunkTop = baseY - height * 0.72;
+    // Slight curve so palms don't read as fence posts.
+    final curve = width * 0.10;
+
+    final trunkPath = ui.Path()
+      ..moveTo(centerX - trunkW / 2, baseY)
+      ..lineTo(centerX - trunkW / 2 + curve, trunkTop)
+      ..lineTo(centerX + trunkW / 2 + curve, trunkTop)
+      ..lineTo(centerX + trunkW / 2, baseY)
+      ..close();
+    canvas.drawPath(trunkPath, ui.Paint()..color = trunk);
+
+    // Trunk rings.
+    for (var i = 1; i < 5; i++) {
+      final t = i / 5;
+      final y = baseY - height * 0.72 * t;
+      final xOff = curve * t;
+      _rect(canvas, centerX - trunkW * 0.7 + xOff, y, trunkW * 1.4,
+          height * 0.018, trunkDark);
+    }
+
+    final topX = centerX + curve;
+    // Six fronds radiating up and out.
+    for (var i = 0; i < 6; i++) {
+      final angle = -math.pi / 2 + (i - 2.5) * 0.42;
+      final frondLen = width * (0.55 + (i % 2) * 0.12);
+      final endX = topX + math.cos(angle) * frondLen;
+      final endY = trunkTop + math.sin(angle) * frondLen * 0.55;
+      canvas.drawLine(
+        ui.Offset(topX, trunkTop),
+        ui.Offset(endX, endY),
+        ui.Paint()
+          ..color = frond
+          ..strokeWidth = math.max(1.5, width * 0.065),
+      );
+      canvas.drawLine(
+        ui.Offset(topX, trunkTop - height * 0.01),
+        ui.Offset(endX - width * 0.02, endY + height * 0.01),
+        ui.Paint()
+          ..color = frondLit
+          ..strokeWidth = math.max(1.0, width * 0.038),
+      );
+    }
+
+    // Coconuts at the crown.
+    for (var i = -1; i <= 1; i++) {
+      canvas.drawCircle(
+        ui.Offset(topX + i * width * 0.05, trunkTop + height * 0.025),
+        math.max(1.0, width * 0.028),
+        ui.Paint()..color = trunkDark,
+      );
+    }
+  }
+
+  void _drawCypress(ui.Canvas canvas, double centerX, double baseY,
+      double width, double height) {
+    const body = ui.Color(0xFF2C5340);
+    const highlight = ui.Color(0xFF467058);
+
+    final treeW = math.max(3.0, width * 0.24);
+    // Narrow column, tapering to a point.
+    final path = ui.Path()
+      ..moveTo(centerX, baseY - height)
+      ..lineTo(centerX - treeW * 0.5, baseY - height * 0.30)
+      ..lineTo(centerX - treeW * 0.5, baseY - height * 0.06)
+      ..lineTo(centerX + treeW * 0.5, baseY - height * 0.06)
+      ..lineTo(centerX + treeW * 0.5, baseY - height * 0.30)
+      ..close();
+    canvas.drawPath(path, ui.Paint()..color = body);
+
+    // Sun-side highlight.
+    final lit = ui.Path()
+      ..moveTo(centerX, baseY - height)
+      ..lineTo(centerX - treeW * 0.5, baseY - height * 0.30)
+      ..lineTo(centerX - treeW * 0.5, baseY - height * 0.06)
+      ..lineTo(centerX - treeW * 0.15, baseY - height * 0.06)
+      ..lineTo(centerX - treeW * 0.15, baseY - height * 0.30)
+      ..close();
+    canvas.drawPath(lit, ui.Paint()..color = highlight);
+
+    // Tiny trunk.
+    _rect(canvas, centerX - width * 0.03, baseY - height * 0.08,
+        width * 0.06, height * 0.08, const ui.Color(0xFF4A3222));
+  }
+
+  void _drawCactus(ui.Canvas canvas, double centerX, double baseY,
+      double width, double height) {
+    const body = ui.Color(0xFF3E7C4B);
+    const ridge = ui.Color(0xFF67A56F);
+
+    final trunkW = math.max(2.0, width * 0.16);
+    // Main column.
+    _rect(canvas, centerX - trunkW / 2, baseY - height, trunkW, height, body);
+
+    // Two arms, one on each side.
+    final armY1 = baseY - height * 0.55;
+    final armY2 = baseY - height * 0.40;
+    _rect(canvas, centerX - width * 0.24, armY1 + height * 0.20,
+        trunkW * 0.75, height * 0.20, body);
+    _rect(canvas, centerX - width * 0.24, armY1, width * 0.09,
+        height * 0.25, body);
+    _rect(canvas, centerX + width * 0.15, armY2 + height * 0.15,
+        trunkW * 0.75, height * 0.18, body);
+    _rect(canvas, centerX + width * 0.15, armY2, width * 0.09,
+        height * 0.20, body);
+
+    // Ribs.
+    for (var i = 0; i < 3; i++) {
+      final rx = centerX - trunkW * 0.5 + (i + 1) * trunkW / 4;
+      _rect(canvas, rx, baseY - height, math.max(1.0, trunkW * 0.10),
+          height, ridge);
+    }
+  }
+
+  void _drawShrub(ui.Canvas canvas, double centerX, double baseY,
+      double width, double height, bool snowy) {
+    final tone = snowy ? const ui.Color(0xFF5E6E68) : const ui.Color(0xFF3D6B45);
+    final lit = snowy
+        ? const ui.Color(0xFF96A6A0)
+        : const ui.Color(0xFF61986A);
+    final shrubW = width * 0.55;
+    final shrubH = height * 0.42;
+    canvas.drawOval(
+      ui.Rect.fromCenter(
+        center: ui.Offset(centerX, baseY - shrubH * 0.5),
+        width: shrubW,
+        height: shrubH,
+      ),
+      ui.Paint()..color = tone,
+    );
+    // Two lighter bumps on top for texture.
+    for (var i = -1; i <= 1; i += 2) {
+      canvas.drawOval(
+        ui.Rect.fromCenter(
+          center: ui.Offset(centerX + i * shrubW * 0.22,
+              baseY - shrubH * 0.75),
+          width: shrubW * 0.34,
+          height: shrubH * 0.45,
+        ),
+        ui.Paint()..color = lit,
+      );
+    }
+  }
+
+  void _drawBaobab(ui.Canvas canvas, double centerX, double baseY,
+      double width, double height) {
+    const trunk = ui.Color(0xFF7A5638);
+    const trunkDark = ui.Color(0xFF5B3E28);
+    const canopy = ui.Color(0xFF3F6D3A);
+
+    // Very fat trunk that tapers into a bulge.
+    final trunkW = width * 0.32;
+    final path = ui.Path()
+      ..moveTo(centerX - trunkW * 0.5, baseY)
+      ..lineTo(centerX - trunkW * 0.35, baseY - height * 0.65)
+      ..lineTo(centerX + trunkW * 0.35, baseY - height * 0.65)
+      ..lineTo(centerX + trunkW * 0.5, baseY)
+      ..close();
+    canvas.drawPath(path, ui.Paint()..color = trunk);
+    // A rounded bulge around waist height.
+    canvas.drawOval(
+      ui.Rect.fromCenter(
+        center: ui.Offset(centerX, baseY - height * 0.42),
+        width: trunkW * 1.15,
+        height: height * 0.30,
+      ),
+      ui.Paint()..color = trunk,
+    );
+    // Bark line.
+    _rect(canvas, centerX - trunkW * 0.04, baseY - height * 0.65,
+        trunkW * 0.08, height * 0.65, trunkDark);
+
+    // Wide, sparse, flat canopy.
+    final canopyW = width * 0.95;
+    final canopyH = height * 0.28;
+    canvas.drawOval(
+      ui.Rect.fromCenter(
+        center: ui.Offset(centerX, baseY - height * 0.78),
+        width: canopyW,
+        height: canopyH,
+      ),
+      ui.Paint()..color = canopy,
+    );
+    // Leaf clusters around the canopy edge, sparse enough to read as baobab.
+    for (var i = 0; i < 7; i++) {
+      final angle = i * math.pi * 2 / 7;
+      final cx = centerX + math.cos(angle) * canopyW * 0.42;
+      final cy = baseY - height * 0.78 + math.sin(angle) * canopyH * 0.35;
+      canvas.drawCircle(
+          ui.Offset(cx, cy), math.max(1.2, width * 0.045),
+          ui.Paint()..color = canopy);
+    }
+  }
+
   void _drawSeasonParticles(ui.Canvas canvas, double w, double h) {
     if (_autumnWorld) {
       for (var i = 0; i < 15; i++) {
@@ -1814,6 +2091,1395 @@ class WeatherSceneGame extends FlameGame with TapCallbacks, LongPressCallbacks {
         _rect(canvas, x, y, w * .012, h * .009, petal);
         _rect(canvas, x + w * .005, y - h * .004, w * .007, h * .008, petal);
       }
+    }
+  }
+
+    /// Foreground plane: grass tufts, rocks, and small debris drawn in front of
+  /// everything else and moving fastest with wind. This is what turns the
+  /// scene from a diorama into a place with depth.
+  void _drawForeground(ui.Canvas canvas, double w, double h) {
+    final unit = math.max(2.0, math.min(w, h) * .020).toDouble();
+    final seed = worldLocationSeed(location);
+    final rng = math.Random(seed ^ 0x5AF3);
+    // Foreground moves more than mid-ground: the closest layer swings widest
+    // when wind blows. Same formula, bigger scale.
+    final wind = (_wind / 160).clamp(0.0, 1.0).toDouble();
+    final bearing = math.cos(windDirectionDeg * math.pi / 180);
+    final direction = bearing == 0 ? 1.0 : bearing.sign;
+    final swayBase = w * .05 * wind * direction * _environmentMotionScale;
+    final baseY = h * .955;
+
+    // Short grass tufts across the bottom edge. Density varies by biome so
+    // a desert gets sparse tufts and a plains city gets a full band.
+    final density = switch (location.biome) {
+      WorldBiome.desert || WorldBiome.coldDesert => 6,
+      WorldBiome.coastal => 10,
+      WorldBiome.urban => 5,
+      _ => 14,
+    };
+    final grassCount = density + rng.nextInt(4);
+    final tuftColour = _foregroundGrassColour;
+
+    for (var i = 0; i < grassCount; i++) {
+      final baseX = w * (i + rng.nextDouble() * .5) / grassCount;
+      final height = unit * (2.2 + rng.nextDouble() * 2.6);
+      final sway = math.sin(_elapsed * 2.4 + i * .7) * unit * .35 +
+          swayBase * (.4 + rng.nextDouble() * .4);
+      final x = baseX + sway;
+      // Each tuft is three vertical blades at slightly different angles.
+      _rect(canvas, x - unit * .18, baseY - height, unit * .35, height,
+          tuftColour);
+      _rect(canvas, x + unit * .30, baseY - height * .78, unit * .32,
+          height * .78, tuftColour);
+      _rect(canvas, x - unit * .55, baseY - height * .55, unit * .30,
+          height * .55, tuftColour);
+    }
+
+    // A few small rocks sitting just inside the bottom edge. They anchor the
+    // foreground without blocking the character's feet.
+    final rockCount = 2 + rng.nextInt(3);
+    final rockColour = _foregroundRockColour;
+    for (var i = 0; i < rockCount; i++) {
+      final x = w * (.06 + rng.nextDouble() * .88);
+      final y = baseY + unit * rng.nextDouble() * .9;
+      final rw = unit * (1.6 + rng.nextDouble() * 1.4);
+      final rh = rw * (.55 + rng.nextDouble() * .35);
+      // Rock is a flattened oval with a highlight sliver on the sun side.
+      canvas.drawOval(
+        ui.Rect.fromLTWH(x - rw / 2, y - rh, rw, rh),
+        ui.Paint()..color = rockColour,
+      );
+      _rect(canvas, x - rw * .35, y - rh * 1.05, rw * .4, rh * .18,
+          rockColour.withAlpha(200));
+    }
+
+    // One larger silhouette in the corner — a fallen branch, a leaf, or a
+    // piece of debris. Rotates by biome so each region has its own character.
+    final cornerX = rng.nextBool() ? w * .04 : w * .96;
+    final cornerDir = cornerX < w * .5 ? 1.0 : -1.0;
+    _drawForegroundCornerProp(canvas, cornerX, baseY, unit, cornerDir, rng);
+  }
+
+  ui.Color get _foregroundGrassColour {
+    if (_winterWorld) return const ui.Color(0xFF26474A);
+    if (_autumnWorld) return const ui.Color(0xFF4A2E1C);
+    if (_hot) return const ui.Color(0xFF6B4A24);
+    if (_storm || _rain) return const ui.Color(0xFF15262A);
+    if (isDay) return const ui.Color(0xFF1B3A26);
+    return const ui.Color(0xFF16261E);
+  }
+
+  ui.Color get _foregroundRockColour {
+    if (_winterWorld) return const ui.Color(0xFF3E4F55);
+    if (_hot) return const ui.Color(0xFF6E4A28);
+    if (isDay) return const ui.Color(0xFF3A3228);
+    return const ui.Color(0xFF23201A);
+  }
+
+  /// A single large prop in the very front corner of the frame. Reads as
+  /// "the camera is standing right next to this."
+  void _drawForegroundCornerProp(ui.Canvas canvas, double x, double baseY,
+      double unit, double direction, math.Random rng) {
+    final kind = rng.nextInt(3);
+    final colour = _foregroundGrassColour;
+    switch (kind) {
+      case 0:
+        // Fallen branch lying across the corner.
+        final length = unit * (8 + rng.nextDouble() * 4);
+        final tilt = direction * .18;
+        canvas.save();
+        canvas.translate(x, baseY + unit * 1.5);
+        canvas.rotate(tilt);
+        _rect(canvas, -length * .5, -unit * .5, length, unit, colour);
+        // A couple of small twigs branching off.
+        _rect(canvas, length * .1, -unit * 1.2, unit * .4, unit * .8, colour);
+        _rect(canvas, length * .28, -unit * 1.4, unit * .35, unit * 1.1,
+            colour);
+        canvas.restore();
+      case 1:
+        // Large leaf.
+        final w0 = unit * (5 + rng.nextDouble() * 3);
+        final h0 = w0 * .5;
+        canvas.save();
+        canvas.translate(x, baseY);
+        canvas.rotate(direction * .3);
+        canvas.drawOval(
+          ui.Rect.fromLTWH(-w0 * .5, -h0 * .5, w0, h0),
+          ui.Paint()..color = colour,
+        );
+        // Central vein.
+        _rect(canvas, -w0 * .45, -unit * .08, w0 * .9, unit * .16,
+            colour.withAlpha(140));
+        canvas.restore();
+      case 2:
+        // Small clump of taller grass, denser than the tufts above.
+        for (var i = 0; i < 6; i++) {
+          final gx = x + (rng.nextDouble() - .5) * unit * 3.5;
+          final gh = unit * (3 + rng.nextDouble() * 3);
+          _rect(canvas, gx, baseY - gh, unit * .45, gh, colour);
+        }
+    }
+  }
+
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Local Markers
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /// Draws the current city's local marker, if any, plus its small name tag.
+  void _drawLocalMarker(ui.Canvas canvas, double w, double h) {
+    final marker = _localMarker;
+    if (marker == null) return;
+    final x = w * _markerLaneX;
+    final y = _sceneFloor(h);
+    final u = math.max(1.5, math.min(w, h) * .009).toDouble();
+
+    switch (marker.kind) {
+      case LocalMarkerKind.jhumkaShop:
+        _drawJhumkaShop(canvas, x, y, u);
+      case LocalMarkerKind.brasswareShop:
+        _drawBrasswareShop(canvas, x, y, u);
+      case LocalMarkerKind.lockShop:
+        _drawLockShop(canvas, x, y, u);
+      case LocalMarkerKind.bangleStall:
+        _drawBangleStall(canvas, x, y, u);
+      case LocalMarkerKind.chikanStall:
+        _drawChikanStall(canvas, x, y, u);
+      case LocalMarkerKind.pethaShop:
+        _drawPethaShop(canvas, x, y, u);
+      case LocalMarkerKind.littiChokha:
+        _drawLittiChokha(canvas, x, y, u);
+      case LocalMarkerKind.pohaJalebiCart:
+        _drawPohaJalebiCart(canvas, x, y, u);
+      case LocalMarkerKind.orangeBasket:
+        _drawOrangeBasket(canvas, x, y, u);
+      case LocalMarkerKind.biryaniPot:
+        _drawBiryaniPot(canvas, x, y, u);
+      case LocalMarkerKind.rosogollaStall:
+        _drawRosogollaStall(canvas, x, y, u);
+      case LocalMarkerKind.filterCoffeeStand:
+        _drawFilterCoffeeStand(canvas, x, y, u);
+      case LocalMarkerKind.diyaCluster:
+        _drawDiyaCluster(canvas, x, y, u);
+      case LocalMarkerKind.kathputliPuppet:
+        _drawKathputliPuppet(canvas, x, y, u);
+      case LocalMarkerKind.vadaPavCart:
+        _drawVadaPavCart(canvas, x, y, u);
+      case LocalMarkerKind.tramStop:
+        _drawTramStop(canvas, x, y, u);
+      case LocalMarkerKind.chaiStall:
+        _drawChaiStall(canvas, x, y, u);
+      case LocalMarkerKind.cafeTable:
+        _drawCafeTable(canvas, x, y, u);
+      case LocalMarkerKind.vendingMachine:
+        _drawVendingMachine(canvas, x, y, u);
+      case LocalMarkerKind.phoneBox:
+        _drawPhoneBox(canvas, x, y, u);
+      case LocalMarkerKind.hotDogCart:
+        _drawHotDogCart(canvas, x, y, u);
+      case LocalMarkerKind.scooter:
+        _drawScooter(canvas, x, y, u);
+      case LocalMarkerKind.hawkerStall:
+        _drawHawkerStall(canvas, x, y, u);
+    }
+  }
+
+  // ── Indian markers ────────────────────────────────────────────────────────
+
+  /// Small shop front hung with jhumkas. The Bareilly signature.
+  void _drawJhumkaShop(ui.Canvas canvas, double x, double y, double u) {
+    const wood = ui.Color(0xFF7A5638);
+    const woodDark = ui.Color(0xFF4C3421);
+    const cloth = ui.Color(0xFFB0413A);
+    const gold = ui.Color(0xFFE4B54D);
+    const goldDark = ui.Color(0xFF9D7A28);
+    // Booth back and roof.
+    _rect(canvas, x - u * 9, y - u * 16, u * 18, u * 16, wood);
+    _rect(canvas, x - u * 11, y - u * 18, u * 22, u * 3, woodDark);
+    _rect(canvas, x - u * 11, y - u * 15, u * 22, u * 1.2, cloth);
+    // Hanging rack.
+    _rect(canvas, x - u * 7, y - u * 14, u * 14, u * .5, woodDark);
+    // Three jhumkas: dome, ring, and three beads, descending sizes.
+    for (var i = -1; i <= 1; i++) {
+      final jx = x + i * u * 5;
+      final jy = y - u * 13;
+      // Hook line.
+      _rect(canvas, jx - u * .12, jy, u * .25, u * 1.5, goldDark);
+      // Bell.
+      canvas.drawArc(
+        ui.Rect.fromLTWH(jx - u * 1.4, jy + u * 1.5, u * 2.8, u * 2.4),
+        0,
+        math.pi,
+        true,
+        ui.Paint()..color = gold,
+      );
+      _rect(canvas, jx - u * 1.4, jy + u * 1.6, u * 2.8, u * .35, goldDark);
+      // Beads.
+      for (var b = 0; b < 3; b++) {
+        canvas.drawCircle(
+          ui.Offset(jx - u * .7 + b * u * .7, jy + u * 4.4),
+          u * .28,
+          ui.Paint()..color = gold,
+        );
+      }
+      // Small sway highlight.
+      _rect(canvas, jx - u * .2, jy + u * 1.9, u * .3, u * .8,
+          const ui.Color(0xFFFFE9A8));
+    }
+    // Counter and a small tray.
+    _rect(canvas, x - u * 9, y - u * 3, u * 18, u * .8, woodDark);
+    _rect(canvas, x + u * 2, y - u * 2.8, u * 5, u * .4, gold);
+  }
+
+  void _drawBrasswareShop(ui.Canvas canvas, double x, double y, double u) {
+    const wall = ui.Color(0xFF6B4A34);
+    const brass = ui.Color(0xFFD9A24E);
+    const brassLit = ui.Color(0xFFF1C876);
+    const brassDark = ui.Color(0xFF8E6423);
+    _rect(canvas, x - u * 9, y - u * 14, u * 18, u * 14, wall);
+    _rect(canvas, x - u * 10, y - u * 16, u * 20, u * 2.5,
+        const ui.Color(0xFF3C2A1E));
+    // Stacked pots, three sizes.
+    for (var i = 0; i < 3; i++) {
+      final px = x - u * 6 + i * u * 6;
+      final ph = u * (4 + i * .6);
+      canvas.drawOval(
+        ui.Rect.fromLTWH(px - u * 2.2, y - ph, u * 4.4, ph),
+        ui.Paint()..color = brass,
+      );
+      canvas.drawArc(
+        ui.Rect.fromLTWH(px - u * 2.2, y - ph, u * 4.4, ph),
+        math.pi,
+        math.pi,
+        false,
+        ui.Paint()
+          ..color = brassDark
+          ..style = ui.PaintingStyle.stroke
+          ..strokeWidth = 1.2,
+      );
+      // Rim and highlight.
+      _rect(canvas, px - u * 1.8, y - ph, u * 3.6, u * .4, brassLit);
+      _rect(canvas, px - u * 1.4, y - ph + u * .9, u * .8, ph * .55,
+          brassLit.withAlpha(120));
+    }
+  }
+
+  void _drawLockShop(ui.Canvas canvas, double x, double y, double u) {
+    const wall = ui.Color(0xFF5B4632);
+    const iron = ui.Color(0xFF7C8894);
+    const ironDark = ui.Color(0xFF424A54);
+    _rect(canvas, x - u * 9, y - u * 15, u * 18, u * 15, wall);
+    _rect(canvas, x - u * 10, y - u * 17, u * 20, u * 2.5,
+        const ui.Color(0xFF34281F));
+    // Rack with padlocks in three rows.
+    for (var row = 0; row < 3; row++) {
+      final ry = y - u * (12 - row * 4);
+      _rect(canvas, x - u * 7, ry, u * 14, u * .35, ironDark);
+      for (var col = 0; col < 4; col++) {
+        final lx = x - u * 5.5 + col * u * 3.6;
+        // Body.
+        _rect(canvas, lx, ry + u * .5, u * 1.8, u * 2.4, iron);
+        _rect(canvas, lx, ry + u * .5, u * 1.8, u * .4, ironDark);
+        // Shackle.
+        canvas.drawArc(
+          ui.Rect.fromLTWH(lx + u * .3, ry - u * .4, u * 1.2, u * 1.4),
+          math.pi,
+          math.pi,
+          false,
+          ui.Paint()
+            ..color = iron
+            ..style = ui.PaintingStyle.stroke
+            ..strokeWidth = u * .35,
+        );
+      }
+    }
+  }
+
+  void _drawBangleStall(ui.Canvas canvas, double x, double y, double u) {
+    const frame = ui.Color(0xFF5A4733);
+    const cloth = ui.Color(0xFFE8C76A);
+    _rect(canvas, x - u * 9, y - u * 16, u * 18, u * 16,
+        const ui.Color(0xFF6B5A43));
+    _rect(canvas, x - u * 10, y - u * 18, u * 20, u * 2.5, frame);
+    _rect(canvas, x - u * 9, y - u * 15.5, u * 18, u * 1.2, cloth);
+    // Three wire racks, each hung with bangles.
+    const colours = [
+      ui.Color(0xFFD1435B),
+      ui.Color(0xFF3B80B8),
+      ui.Color(0xFF4FA85E),
+      ui.Color(0xFFE1A034),
+      ui.Color(0xFF9B55C4),
+    ];
+    for (var rack = 0; rack < 3; rack++) {
+      final rx = x - u * 6 + rack * u * 6;
+      _rect(canvas, rx - u * .12, y - u * 13, u * .25, u * 12, frame);
+      for (var b = 0; b < 4; b++) {
+        final by = y - u * (12 - b * 2.8);
+        canvas.drawCircle(
+          ui.Offset(rx, by),
+          u * 1.1,
+          ui.Paint()
+            ..color = colours[(rack + b) % colours.length]
+            ..style = ui.PaintingStyle.stroke
+            ..strokeWidth = u * .55,
+        );
+      }
+    }
+  }
+
+  void _drawChikanStall(ui.Canvas canvas, double x, double y, double u) {
+    const wood = ui.Color(0xFF6B4A34);
+    const cloth = ui.Color(0xFFF2ECD8);
+    const thread = ui.Color(0xFF8AAE68);
+    _rect(canvas, x - u * 9, y - u * 14, u * 18, u * 14, wood);
+    _rect(canvas, x - u * 10, y - u * 16, u * 20, u * 2.5,
+        const ui.Color(0xFF3F2E22));
+    // Three panels of chikankari hanging down.
+    for (var i = 0; i < 3; i++) {
+      final px = x - u * 6 + i * u * 6;
+      _rect(canvas, px - u * 2, y - u * 13, u * 4, u * 12, cloth);
+      // Embroidered motif, small vine.
+      for (var d = 0; d < 5; d++) {
+        canvas.drawCircle(
+          ui.Offset(px - u * .8 + (d % 3) * u * .8, y - u * (11.6 - d * 1.8)),
+          u * .35,
+          ui.Paint()..color = thread,
+        );
+      }
+      canvas.drawLine(
+        ui.Offset(px - u * 1.2, y - u * 1.5),
+        ui.Offset(px + u * 1.2, y - u * 1.5),
+        ui.Paint()
+          ..color = thread
+          ..strokeWidth = u * .35,
+      );
+    }
+  }
+
+  void _drawPethaShop(ui.Canvas canvas, double x, double y, double u) {
+    const counter = ui.Color(0xFF6B4A34);
+    const counterTop = ui.Color(0xFF9A6A44);
+    const petha = ui.Color(0xFFF0E7D0);
+    const pethaEdge = ui.Color(0xFFD6CBAA);
+    _rect(canvas, x - u * 9, y - u * 8, u * 18, u * 8, counter);
+    _rect(canvas, x - u * 10, y - u * 9, u * 20, u * 1.5, counterTop);
+    // Three trays of petha cubes.
+    for (var t = 0; t < 3; t++) {
+      final tx = x - u * 7 + t * u * 7;
+      _rect(canvas, tx - u * 2.6, y - u * 10, u * 5.2, u * 1.4,
+          const ui.Color(0xFF4A3A28));
+      for (var row = 0; row < 2; row++) {
+        for (var col = 0; col < 3; col++) {
+          _rect(
+            canvas,
+            tx - u * 2 + col * u * 1.4,
+            y - u * (9.6 - row * .9),
+            u * 1.1,
+            u * .8,
+            petha,
+          );
+          _rect(canvas, tx - u * 2 + col * u * 1.4,
+              y - u * (9.6 - row * .9), u * 1.1, u * .18, pethaEdge);
+        }
+      }
+    }
+  }
+
+  void _drawLittiChokha(ui.Canvas canvas, double x, double y, double u) {
+    const stone = ui.Color(0xFF5A544A);
+    const fire = ui.Color(0xFFE86A2F);
+    const litti = ui.Color(0xFFA67845);
+    const chokha = ui.Color(0xFF8A4A33);
+    // Fire ring.
+    _rect(canvas, x - u * 5, y - u * 1.5, u * 10, u * 1.5, stone);
+    for (var i = 0; i < 5; i++) {
+      canvas.drawArc(
+        ui.Rect.fromLTWH(x - u * 3 + i * u * 1.4, y - u * 3, u * 1.4, u * 3),
+        0,
+        math.pi,
+        true,
+        ui.Paint()..color = fire.withAlpha(180),
+      );
+    }
+    // Littis on sticks around the fire.
+    for (var i = 0; i < 4; i++) {
+      final a = -math.pi / 2 + (i - 1.5) * .5;
+      final lx = x + math.cos(a) * u * 3.2;
+      final ly = y - u * 2.5 + math.sin(a) * u * 1.2;
+      canvas.drawCircle(ui.Offset(lx, ly), u * .9,
+          ui.Paint()..color = litti);
+    }
+    // Chokha bowl to the side.
+    canvas.drawArc(
+      ui.Rect.fromLTWH(x + u * 5, y - u * 3.5, u * 3.4, u * 3),
+      0,
+      math.pi,
+      true,
+      ui.Paint()..color = chokha,
+    );
+    _rect(canvas, x + u * 4.8, y - u * 2.2, u * 3.8, u * .5,
+        const ui.Color(0xFF4A2A1E));
+  }
+
+  void _drawPohaJalebiCart(ui.Canvas canvas, double x, double y, double u) {
+    const cart = ui.Color(0xFF8E6A3E);
+    const cartDark = ui.Color(0xFF5C4226);
+    const plate = ui.Color(0xFFEFE4C9);
+    const poha = ui.Color(0xFFE1C378);
+    const jalebi = ui.Color(0xFFD8722C);
+    // Cart body and wheels.
+    _rect(canvas, x - u * 9, y - u * 8, u * 18, u * 5.5, cart);
+    _rect(canvas, x - u * 9, y - u * 8.5, u * 18, u * 1, cartDark);
+    canvas.drawCircle(ui.Offset(x - u * 6, y - u * 1.5), u * 1.6,
+        ui.Paint()..color = cartDark);
+    canvas.drawCircle(ui.Offset(x + u * 6, y - u * 1.5), u * 1.6,
+        ui.Paint()..color = cartDark);
+    // Poha on a shallow tray.
+    _rect(canvas, x - u * 8, y - u * 10, u * 8, u * 1.2, plate);
+    for (var i = 0; i < 5; i++) {
+      canvas.drawCircle(
+        ui.Offset(x - u * 6.8 + (i % 3) * u * 1.8, y - u * 9.4 - (i ~/ 3) * u * .8),
+        u * .5,
+        ui.Paint()..color = poha,
+      );
+    }
+    // Jalebis, spirals.
+    _rect(canvas, x + u * 1, y - u * 10, u * 7, u * 1.2, plate);
+    for (var i = 0; i < 3; i++) {
+      canvas.drawCircle(
+        ui.Offset(x + u * 2.5 + i * u * 2, y - u * 9.5),
+        u * .9,
+        ui.Paint()
+          ..color = jalebi
+          ..style = ui.PaintingStyle.stroke
+          ..strokeWidth = u * .6,
+      );
+    }
+  }
+
+  void _drawOrangeBasket(ui.Canvas canvas, double x, double y, double u) {
+    const wicker = ui.Color(0xFFB58B4A);
+    const wickerDark = ui.Color(0xFF7C5C2F);
+    const orange = ui.Color(0xFFE8812A);
+    const leaf = ui.Color(0xFF3F7A3A);
+    // Two baskets side by side.
+    for (var b = 0; b < 2; b++) {
+      final bx = x + (b - .5) * u * 10;
+      // Basket body.
+      canvas.drawArc(
+        ui.Rect.fromLTWH(bx - u * 4.4, y - u * 6, u * 8.8, u * 6),
+        0,
+        math.pi,
+        true,
+        ui.Paint()..color = wicker,
+      );
+      _rect(canvas, bx - u * 4.4, y - u * 3.2, u * 8.8, u * .5, wickerDark);
+      // Oranges piled on top.
+      for (var r = 0; r < 3; r++) {
+        final count = 3 - r;
+        for (var i = 0; i < count; i++) {
+          final ox = bx - (count - 1) * u * 1.4 + i * u * 2.8;
+          final oy = y - u * (7 + r * 1.9);
+          canvas.drawCircle(ui.Offset(ox, oy), u * 1.2,
+              ui.Paint()..color = orange);
+          _rect(canvas, ox - u * .25, oy - u * 1.4, u * .5, u * .6, leaf);
+        }
+      }
+    }
+  }
+
+  void _drawBiryaniPot(ui.Canvas canvas, double x, double y, double u) {
+    const pot = ui.Color(0xFF6E6A63);
+    const potDark = ui.Color(0xFF3F3D38);
+    const lid = ui.Color(0xFFD9B774);
+    const steam = ui.Color(0x55FFFFFF);
+    // Large dum pot.
+    canvas.drawArc(
+      ui.Rect.fromLTWH(x - u * 6, y - u * 10, u * 12, u * 10),
+      0,
+      math.pi,
+      true,
+      ui.Paint()..color = pot,
+    );
+    _rect(canvas, x - u * 6, y - u * 6, u * 12, u * 1, potDark);
+    _rect(canvas, x - u * 6.6, y - u * 10.5, u * 13.2, u * 1.4, lid);
+    _rect(canvas, x - u * .8, y - u * 12, u * 1.6, u * 1.6, lid);
+    // Steam wisps rising above.
+    for (var i = 0; i < 3; i++) {
+      final sx = x - u * 3 + i * u * 3;
+      final sy = y - u * (13 + (i * 1.4));
+      canvas.drawCircle(ui.Offset(sx, sy), u * 1.1,
+          ui.Paint()..color = steam);
+    }
+  }
+
+  void _drawRosogollaStall(ui.Canvas canvas, double x, double y, double u) {
+    const wood = ui.Color(0xFF6B4A34);
+    const glass = ui.Color(0x88B8D8E0);
+    const syrup = ui.Color(0xFFE7C980);
+    const rosogolla = ui.Color(0xFFF5EAD0);
+    _rect(canvas, x - u * 9, y - u * 12, u * 18, u * 12, wood);
+    _rect(canvas, x - u * 9.5, y - u * 12, u * 19, u * 1.5,
+        const ui.Color(0xFF3D2A1E));
+    // Glass case with two trays of rosogollas.
+    for (var t = 0; t < 2; t++) {
+      final ty = y - u * (10 - t * 4.6);
+      _rect(canvas, x - u * 7.5, ty, u * 15, u * 3.6, glass);
+      _rect(canvas, x - u * 7, ty + u * .5, u * 14, u * 2.6, syrup);
+      for (var i = 0; i < 6; i++) {
+        canvas.drawCircle(
+          ui.Offset(x - u * 5.5 + i * u * 2.2, ty + u * 1.8),
+          u * .85,
+          ui.Paint()..color = rosogolla,
+        );
+      }
+      _rect(canvas, x - u * 7.5, ty, u * 15, u * .3,
+          const ui.Color(0xFFCBA96A));
+    }
+  }
+
+  void _drawFilterCoffeeStand(ui.Canvas canvas, double x, double y, double u) {
+    const steel = ui.Color(0xFFC7CDD0);
+    const steelDark = ui.Color(0xFF7A8185);
+    const coffee = ui.Color(0xFF5A3419);
+    const steam = ui.Color(0x55FFFFFF);
+    // Small counter.
+    _rect(canvas, x - u * 6, y - u * 8, u * 12, u * 8,
+        const ui.Color(0xFF6B4A34));
+    _rect(canvas, x - u * 6.5, y - u * 8.5, u * 13, u * 1.2, steelDark);
+    // Filter coffee set: upper drum, lower tumbler, small davara beside.
+    // Upper drum.
+    _rect(canvas, x - u * 3, y - u * 14, u * 6, u * 4.2, steel);
+    _rect(canvas, x - u * 3, y - u * 14, u * 6, u * .4, steelDark);
+    _rect(canvas, x - u * 3.4, y - u * 10.3, u * 6.8, u * .8, steelDark);
+    // Drip.
+    _rect(canvas, x - u * .15, y - u * 9.4, u * .3, u * 1.2, coffee);
+    // Lower tumbler with coffee.
+    _rect(canvas, x - u * 2.6, y - u * 8.4, u * 5.2, u * 3.4, steel);
+    _rect(canvas, x - u * 2.2, y - u * 7.6, u * 4.4, u * 2.2, coffee);
+    // Small davara to the side.
+    _rect(canvas, x + u * 3.2, y - u * 6.4, u * 2.6, u * 1.4, steel);
+    _rect(canvas, x + u * 3.4, y - u * 6.2, u * 2.2, u * .5, coffee);
+    // Steam.
+    for (var i = 0; i < 3; i++) {
+      canvas.drawCircle(
+        ui.Offset(x - u * 1 + i * u * 1.2, y - u * (16 + i * .8)),
+        u * .9,
+        ui.Paint()..color = steam,
+      );
+    }
+  }
+
+  void _drawDiyaCluster(ui.Canvas canvas, double x, double y, double u) {
+    const water = ui.Color(0xFF2B4A63);
+    const diya = ui.Color(0xFFB15A34);
+    const flame = ui.Color(0xFFF5C252);
+    const flameCore = ui.Color(0xFFFFF1B0);
+    // Small pool of water.
+    canvas.drawOval(
+      ui.Rect.fromLTWH(x - u * 12, y - u * 2, u * 24, u * 4),
+      ui.Paint()..color = water,
+    );
+    _rect(canvas, x - u * 11, y - u * 2, u * 22, u * .4,
+        const ui.Color(0xFF5D86A1));
+    // Diyas floating.
+    for (var i = 0; i < 4; i++) {
+      final dx = x - u * 8 + i * u * 5.4 + math.sin(_elapsed * .8 + i) * u * .4;
+      final dy = y - u * .4;
+      // Bowl.
+      canvas.drawArc(
+        ui.Rect.fromLTWH(dx - u * 1.4, dy - u * 1, u * 2.8, u * 2),
+        0,
+        math.pi,
+        true,
+        ui.Paint()..color = diya,
+      );
+      // Flame.
+      canvas.drawCircle(ui.Offset(dx, dy - u * 2),
+          u * .9, ui.Paint()..color = flame);
+      canvas.drawCircle(ui.Offset(dx, dy - u * 2),
+          u * .4, ui.Paint()..color = flameCore);
+    }
+  }
+
+  void _drawKathputliPuppet(ui.Canvas canvas, double x, double y, double u) {
+    const stand = ui.Color(0xFF4A3420);
+    const body = ui.Color(0xFFC64A3A);
+    const sash = ui.Color(0xFFE0B448);
+    const face = ui.Color(0xFFF2DFB6);
+    const eyes = ui.Color(0xFF1B1B1B);
+    // Stand.
+    _rect(canvas, x - u * .2, y - u * 2, u * .4, u * 2, stand);
+    _rect(canvas, x - u * 3, y - u * 1, u * 6, u * .7, stand);
+    // Vertical control stick.
+    _rect(canvas, x - u * .2, y - u * 20, u * .4, u * 18, stand);
+    _rect(canvas, x - u * 4, y - u * 20, u * 8, u * .4, stand);
+    // Puppet body.
+    _rect(canvas, x - u * 2, y - u * 16, u * 4, u * 6, body);
+    // Sash across the chest.
+    _rect(canvas, x - u * 2, y - u * 12, u * 4, u * 1, sash);
+    // Head and features.
+    _rect(canvas, x - u * 1.4, y - u * 19, u * 2.8, u * 3, face);
+    _rect(canvas, x - u * 1, y - u * 18.2, u * .5, u * .5, eyes);
+    _rect(canvas, x + u * .5, y - u * 18.2, u * .5, u * .5, eyes);
+    // Skirt flare.
+    final skirt = ui.Path()
+      ..moveTo(x - u * 2, y - u * 10)
+      ..lineTo(x - u * 3.4, y - u * 5)
+      ..lineTo(x + u * 3.4, y - u * 5)
+      ..lineTo(x + u * 2, y - u * 10)
+      ..close();
+    canvas.drawPath(skirt, ui.Paint()..color = body);
+    _rect(canvas, x - u * 3, y - u * 6.5, u * 6, u * .6, sash);
+  }
+
+  void _drawVadaPavCart(ui.Canvas canvas, double x, double y, double u) {
+    const cart = ui.Color(0xFF8A6238);
+    const cartDark = ui.Color(0xFF5A3E22);
+    const fryer = ui.Color(0xFF3F3B33);
+    const oil = ui.Color(0xFFC58A3A);
+    const bun = ui.Color(0xFFDCB478);
+    const chutney = ui.Color(0xFF4E7B3A);
+    // Cart.
+    _rect(canvas, x - u * 9, y - u * 8, u * 18, u * 6, cart);
+    _rect(canvas, x - u * 9, y - u * 8.5, u * 18, u * 1, cartDark);
+    canvas.drawCircle(ui.Offset(x - u * 6, y - u * 1.4), u * 1.5,
+        ui.Paint()..color = cartDark);
+    canvas.drawCircle(ui.Offset(x + u * 6, y - u * 1.4), u * 1.5,
+        ui.Paint()..color = cartDark);
+    // Fryer with oil on one side.
+    _rect(canvas, x - u * 7, y - u * 11.5, u * 7, u * 3.5, fryer);
+    _rect(canvas, x - u * 6.4, y - u * 10.8, u * 5.8, u * 2.2, oil);
+    // A vada floating.
+    canvas.drawCircle(ui.Offset(x - u * 4, y - u * 9.6), u * .9,
+        ui.Paint()..color = ui.Color(0xFFD3A054));
+    // Stack of pav on the other side.
+    _rect(canvas, x + u * 1, y - u * 10, u * 7, u * 2, cartDark);
+    for (var r = 0; r < 3; r++) {
+      for (var i = 0; i < 3; i++) {
+        canvas.drawArc(
+          ui.Rect.fromLTWH(
+              x + u * (1.5 + i * 2.2), y - u * (10 - r * 1), u * 1.8, u * 1),
+          0,
+          math.pi,
+          true,
+          ui.Paint()..color = bun,
+        );
+      }
+    }
+    // Chutney bowl.
+    canvas.drawArc(
+      ui.Rect.fromLTWH(x + u * 1.4, y - u * 7.6, u * 2.6, u * 1.8),
+      0,
+      math.pi,
+      true,
+      ui.Paint()..color = chutney,
+    );
+  }
+
+  void _drawTramStop(ui.Canvas canvas, double x, double y, double u) {
+    const pole = ui.Color(0xFF4B4E52);
+    const roof = ui.Color(0xFF7A4032);
+    const glass = ui.Color(0x88B8D8E0);
+    const sign = ui.Color(0xFFE8C76A);
+    // Two poles.
+    _rect(canvas, x - u * 6, y - u * 14, u * .7, u * 14, pole);
+    _rect(canvas, x + u * 5.3, y - u * 14, u * .7, u * 14, pole);
+    // Roof.
+    final roofPath = ui.Path()
+      ..moveTo(x - u * 8, y - u * 14)
+      ..lineTo(x - u * 6, y - u * 17)
+      ..lineTo(x + u * 6, y - u * 17)
+      ..lineTo(x + u * 8, y - u * 14)
+      ..close();
+    canvas.drawPath(roofPath, ui.Paint()..color = roof);
+    // Glass backing.
+    _rect(canvas, x - u * 6, y - u * 14, u * 12, u * 8, glass);
+    // Bench inside.
+    _rect(canvas, x - u * 5, y - u * 8.5, u * 10, u * 1, pole);
+    // Timetable sign on the front.
+    _rect(canvas, x - u * 4.5, y - u * 13, u * 9, u * 2.5, sign);
+    _rect(canvas, x - u * 4, y - u * 12.6, u * 8, u * .3,
+        const ui.Color(0xFF4B3822));
+    _rect(canvas, x - u * 4, y - u * 11.9, u * 6, u * .3,
+        const ui.Color(0xFF4B3822));
+  }
+
+  void _drawChaiStall(ui.Canvas canvas, double x, double y, double u) {
+    const cart = ui.Color(0xFF7A5638);
+    const cartDark = ui.Color(0xFF4C3421);
+    const kettle = ui.Color(0xFFC2C7CA);
+    const kettleDark = ui.Color(0xFF7D8388);
+    const tea = ui.Color(0xFF8E4A22);
+    const steam = ui.Color(0x66FFFFFF);
+    // Cart.
+    _rect(canvas, x - u * 8, y - u * 7, u * 16, u * 5.5, cart);
+    _rect(canvas, x - u * 8, y - u * 7.5, u * 16, u * 1, cartDark);
+    canvas.drawCircle(ui.Offset(x - u * 5, y - u * 1.4), u * 1.4,
+        ui.Paint()..color = cartDark);
+    canvas.drawCircle(ui.Offset(x + u * 5, y - u * 1.4), u * 1.4,
+        ui.Paint()..color = cartDark);
+    // Kettle on top.
+    _rect(canvas, x - u * 5, y - u * 11, u * 4, u * 3.5, kettle);
+    _rect(canvas, x - u * 5, y - u * 11.5, u * 4, u * .8, kettleDark);
+    // Spout.
+    canvas.drawLine(
+      ui.Offset(x - u * 5, y - u * 9.5),
+      ui.Offset(x - u * 6.4, y - u * 8.6),
+      ui.Paint()
+        ..color = kettle
+        ..strokeWidth = u * .6,
+    );
+    // Handle.
+    canvas.drawArc(
+      ui.Rect.fromLTWH(x - u * 4.6, y - u * 13.4, u * 3.2, u * 2.6),
+      math.pi,
+      math.pi,
+      false,
+      ui.Paint()
+        ..color = kettleDark
+        ..style = ui.PaintingStyle.stroke
+        ..strokeWidth = u * .35,
+    );
+    // Steam above the kettle.
+    for (var i = 0; i < 3; i++) {
+      canvas.drawCircle(
+        ui.Offset(x - u * 3 + i * u * 1.2, y - u * (14 + i * 1.1)),
+        u * .9,
+        ui.Paint()..color = steam,
+      );
+    }
+    // Three glasses on the counter.
+    for (var i = 0; i < 3; i++) {
+      _rect(canvas, x - u * 1.5 + i * u * 2, y - u * 6.5, u * 1, u * 1.5,
+          kettle);
+      _rect(canvas, x - u * 1.5 + i * u * 2, y - u * 5.7, u * 1, u * .7, tea);
+    }
+  }
+
+  // ── International markers ─────────────────────────────────────────────────
+
+  void _drawCafeTable(ui.Canvas canvas, double x, double y, double u) {
+    const metal = ui.Color(0xFF3E3A34);
+    const cloth = ui.Color(0xFFF2ECD8);
+    const coffee = ui.Color(0xFF5A3419);
+    // Table top and leg.
+    canvas.drawOval(
+      ui.Rect.fromLTWH(x - u * 4, y - u * 6, u * 8, u * 1.6),
+      ui.Paint()..color = metal,
+    );
+    _rect(canvas, x - u * .3, y - u * 5, u * .6, u * 5, metal);
+    // Two chairs.
+    for (var s = -1; s <= 1; s += 2) {
+      final cx = x + s * u * 4.5;
+      _rect(canvas, cx - u * 1.2, y - u * 4, u * 2.4, u * .8, metal);
+      _rect(canvas, cx - u * .3, y - u * 3.6, u * .6, u * 3.6, metal);
+      _rect(canvas, cx - u * 1.2, y - u * 6, u * 2.4, u * .4, metal);
+    }
+    // Coffee cup and napkin.
+    _rect(canvas, x - u * 2, y - u * 7, u * 2, u * 1.2, cloth);
+    _rect(canvas, x - u * 1.5, y - u * 7.4, u * 1.2, u * .5, coffee);
+    _rect(canvas, x + u * 1, y - u * 6.6, u * 2, u * .4, cloth);
+  }
+
+  void _drawVendingMachine(ui.Canvas canvas, double x, double y, double u) {
+    const body = ui.Color(0xFFC0443C);
+    const panel = ui.Color(0x88B8D8E0);
+    const button = ui.Color(0xFFE8C76A);
+    const glow = ui.Color(0x33FFE58A);
+    // Body.
+    _rect(canvas, x - u * 4, y - u * 16, u * 8, u * 16, body);
+    _rect(canvas, x - u * 4, y - u * 16, u * 8, u * 1.2,
+        const ui.Color(0xFF7C1F1A));
+    // Glass front.
+    _rect(canvas, x - u * 3, y - u * 14, u * 6, u * 10, panel);
+    // Internal glow.
+    canvas.drawRect(
+      ui.Rect.fromLTWH(x - u * 3, y - u * 14, u * 6, u * 10),
+      ui.Paint()..color = glow,
+    );
+    // Rows of bottles/snacks.
+    const items = [
+      ui.Color(0xFFE0A84B),
+      ui.Color(0xFF5AA85A),
+      ui.Color(0xFF4E7FB8),
+      ui.Color(0xFFD6564A),
+    ];
+    for (var r = 0; r < 3; r++) {
+      _rect(canvas, x - u * 3, y - u * (13 - r * 3.2), u * 6, u * .3,
+          const ui.Color(0xFF3B3B3B));
+      for (var i = 0; i < 4; i++) {
+        _rect(
+          canvas,
+          x - u * 2.6 + i * u * 1.4,
+          y - u * (12.6 - r * 3.2),
+          u * 1,
+          u * 2.4,
+          items[(r + i) % items.length],
+        );
+      }
+    }
+    // Button panel and coin slot.
+    _rect(canvas, x - u * 3, y - u * 3.5, u * 6, u * 1.8,
+        const ui.Color(0xFF2B2B2B));
+    _rect(canvas, x + u * 1.5, y - u * 3.2, u * 1, u * 1.2, button);
+    _rect(canvas, x - u * .5, y - u * 3.2, u * 1.4, u * .4, button);
+  }
+
+  void _drawPhoneBox(ui.Canvas canvas, double x, double y, double u) {
+    const red = ui.Color(0xFFB3312B);
+    const redDark = ui.Color(0xFF6E1815);
+    const glass = ui.Color(0x99B8D8E0);
+    const trim = ui.Color(0xFFF2ECD8);
+    // Body.
+    _rect(canvas, x - u * 4, y - u * 18, u * 8, u * 18, red);
+    // Crown.
+    _rect(canvas, x - u * 4.5, y - u * 19, u * 9, u * 1.2, redDark);
+    _rect(canvas, x - u * 4, y - u * 21, u * 8, u * 2, red);
+    _rect(canvas, x - u * 3, y - u * 22, u * 6, u * 1, redDark);
+    // Sign panel.
+    _rect(canvas, x - u * 3, y - u * 20.4, u * 6, u * 1.4, trim);
+    _rect(canvas, x - u * 2.4, y - u * 20.1, u * 4.8, u * .35, redDark);
+    // Glass windows on the upper half.
+    _rect(canvas, x - u * 2.8, y - u * 16, u * 5.6, u * 6, glass);
+    // Mullions.
+    _rect(canvas, x - u * .12, y - u * 16, u * .24, u * 6, red);
+    _rect(canvas, x - u * 2.8, y - u * 13.2, u * 5.6, u * .24, red);
+    // Lower door.
+    _rect(canvas, x - u * 3.6, y - u * 9, u * 7.2, u * 9, red);
+    _rect(canvas, x - u * 3.6, y - u * 9, u * .3, u * 9, redDark);
+  }
+
+  void _drawHotDogCart(ui.Canvas canvas, double x, double y, double u) {
+    const cart = ui.Color(0xFFE8E2D2);
+    const cartDark = ui.Color(0xFF7C766C);
+    const stripe = ui.Color(0xFFC64A3A);
+    const umbrella = ui.Color(0xFFE8C76A);
+    // Cart body.
+    _rect(canvas, x - u * 7, y - u * 6, u * 14, u * 5, cart);
+    _rect(canvas, x - u * 7, y - u * 6.5, u * 14, u * 1, stripe);
+    _rect(canvas, x - u * 7, y - u * 3, u * 14, u * .5, cartDark);
+    // Wheels.
+    canvas.drawCircle(ui.Offset(x - u * 4.5, y - u * 1.4), u * 1.3,
+        ui.Paint()..color = cartDark);
+    canvas.drawCircle(ui.Offset(x + u * 4.5, y - u * 1.4), u * 1.3,
+        ui.Paint()..color = cartDark);
+    // Umbrella pole and canopy.
+    _rect(canvas, x - u * .15, y - u * 18, u * .3, u * 12, cartDark);
+    final canopy = ui.Path()
+      ..moveTo(x - u * 8, y - u * 18)
+      ..quadraticBezierTo(x, y - u * 22, x + u * 8, y - u * 18)
+      ..lineTo(x + u * 7, y - u * 17)
+      ..quadraticBezierTo(x, y - u * 20, x - u * 7, y - u * 17)
+      ..close();
+    canvas.drawPath(canopy, ui.Paint()..color = umbrella);
+    // A couple of hot dogs on the counter.
+    for (var i = 0; i < 2; i++) {
+      final hx = x - u * 3 + i * u * 4;
+      _rect(canvas, hx, y - u * 6, u * 3, u * 1, ui.Color(0xFFD9A45A));
+      _rect(canvas, hx, y - u * 6.3, u * 3, u * .4, ui.Color(0xFFB34747));
+    }
+  }
+
+  void _drawScooter(ui.Canvas canvas, double x, double y, double u) {
+    const body = ui.Color(0xFFC64A3A);
+    const bodyDark = ui.Color(0xFF6E1815);
+    const wheel = ui.Color(0xFF26211E);
+    const chrome = ui.Color(0xFFC7CDD0);
+    // Wheels.
+    canvas.drawCircle(ui.Offset(x - u * 4, y - u * 1.4), u * 1.4,
+        ui.Paint()..color = wheel);
+    canvas.drawCircle(ui.Offset(x + u * 4, y - u * 1.4), u * 1.4,
+        ui.Paint()..color = wheel);
+    // Body.
+    _rect(canvas, x - u * 3, y - u * 6, u * 6, u * 3, body);
+    _rect(canvas, x - u * 3, y - u * 6, u * 6, u * .6, bodyDark);
+    // Front shield.
+    final shield = ui.Path()
+      ..moveTo(x + u * 2.4, y - u * 6)
+      ..lineTo(x + u * 3.6, y - u * 3)
+      ..lineTo(x + u * 4.4, y - u * 1.5)
+      ..lineTo(x + u * 4, y - u * 6)
+      ..close();
+    canvas.drawPath(shield, ui.Paint()..color = body);
+    // Handlebar.
+    _rect(canvas, x + u * 3.4, y - u * 10, u * .4, u * 4, bodyDark);
+    _rect(canvas, x + u * 2, y - u * 10.4, u * 3, u * .4, chrome);
+    // Headlight.
+    canvas.drawCircle(ui.Offset(x + u * 3.6, y - u * 9.4), u * .6,
+        ui.Paint()..color = ui.Color(0xFFFFE58A));
+    // Seat.
+    _rect(canvas, x - u * 3, y - u * 6.8, u * 3, u * .8, ui.Color(0xFF3B2A1F));
+  }
+
+  void _drawHawkerStall(ui.Canvas canvas, double x, double y, double u) {
+    const awning = ui.Color(0xFFD64B3C);
+    const awningAlt = ui.Color(0xFFF2ECD8);
+    const pole = ui.Color(0xFF5A544A);
+    const table = ui.Color(0xFF8A6A42);
+    const bulb = ui.Color(0xFFF5C252);
+    // Poles and awning.
+    _rect(canvas, x - u * 6, y - u * 14, u * .5, u * 14, pole);
+    _rect(canvas, x + u * 5.5, y - u * 14, u * .5, u * 14, pole);
+    // Striped awning.
+    for (var i = 0; i < 6; i++) {
+      _rect(canvas, x - u * 6.5 + i * u * 2.2, y - u * 15, u * 2.2, u * 1.4,
+          i.isEven ? awning : awningAlt);
+    }
+    _rect(canvas, x - u * 6.5, y - u * 15, u * 13, u * .3, pole);
+    // Bulb hanging in the middle.
+    _rect(canvas, x - u * .15, y - u * 13.6, u * .3, u * 1, pole);
+    canvas.drawCircle(ui.Offset(x, y - u * 12.3), u * .6,
+        ui.Paint()..color = bulb);
+    canvas.drawCircle(ui.Offset(x, y - u * 12.3), u * 1.6,
+        ui.Paint()..color = const ui.Color(0x44F5C252));
+    // Table under the awning.
+    _rect(canvas, x - u * 5, y - u * 6, u * 10, u * .7, table);
+    _rect(canvas, x - u * 4.6, y - u * 5.3, u * .5, u * 5.3, pole);
+    _rect(canvas, x + u * 4.1, y - u * 5.3, u * .5, u * 5.3, pole);
+    // A couple of items on the table.
+    for (var i = 0; i < 3; i++) {
+      _rect(canvas, x - u * 3 + i * u * 2.4, y - u * 7, u * 1.6, u * 1,
+          i.isEven ? awning : ui.Color(0xFFB58B4A));
+    }
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Atmospheric distance — far horizons and haze bands
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /// Adds a distant hill silhouette and two soft haze bands between the sky
+  /// and the existing horizon.
+  ///
+  /// Two ridge layers at decreasing opacity, and two gradient bands the
+  /// colour of the sky, create atmospheric perspective: distant features wash
+  /// out toward the sky tone, which is how the human eye reads distance.
+  void _drawAtmosphericDistance(ui.Canvas canvas, double w, double h) {
+    final skyTone = debugLitSkyColor;
+    final farTone = _horizonFarColor;
+
+    // 1. Furthest ridge — 85% blended toward the sky, barely visible.
+    final furthestTone = ui.Color.lerp(farTone, skyTone, .85)!;
+    canvas.drawPath(_furthestRidgePath(w, h),
+        ui.Paint()..color = furthestTone);
+
+    // 2. Distant ridge — 72% blended, more visible than the furthest.
+    final distantTone = ui.Color.lerp(farTone, skyTone, .72)!;
+    canvas.drawPath(_distantRidgePath(w, h),
+        ui.Paint()..color = distantTone);
+
+    // 3. Upper haze band, softening the top edges of the furthest ridge.
+    final upperTop = h * .42;
+    final upperBottom = h * .50;
+    canvas.drawRect(
+      ui.Rect.fromLTWH(0, upperTop, w, upperBottom - upperTop),
+      ui.Paint()
+        ..shader = ui.Gradient.linear(
+          ui.Offset(0, upperTop),
+          ui.Offset(0, upperBottom),
+          [
+            skyTone.withAlpha(0),
+            skyTone.withAlpha((_atmosphericHazeStrength * .55).round()),
+          ],
+        ),
+    );
+
+    // 4. Lower haze band, the "air" between the distant ridge and the near
+    //    horizon. Stronger, since this is where depth reads most.
+    final lowerTop = h * .50;
+    final lowerBottom = h * .585;
+    canvas.drawRect(
+      ui.Rect.fromLTWH(0, lowerTop, w, lowerBottom - lowerTop),
+      ui.Paint()
+        ..shader = ui.Gradient.linear(
+          ui.Offset(0, lowerTop),
+          ui.Offset(0, lowerBottom),
+          [
+            skyTone.withAlpha(0),
+            skyTone.withAlpha(_atmosphericHazeStrength),
+          ],
+        ),
+    );
+  }
+
+  /// Peak alpha of the atmospheric haze bands, 0–255.
+  ///
+  /// Hazier in rain, fog, and sandstorm; lighter at night and in clear heat
+  /// where the horizon should read as crisp and dry.
+  int get _atmosphericHazeStrength {
+    if (_fog) return 140;
+    if (_sandstorm) return 120;
+    if (_storm || _rain) return 90;
+    if (_hot) return 55;
+    if (!isDay) return 45;
+    return 70;
+  }
+
+  /// Ridge line for the distant hills, higher on the canvas than the existing
+  /// horizon so it reads as further away.
+  ///
+  /// Biomes get different silhouettes: mountains get angular peaks, cities
+  /// get tower blocks, dunes get long shallow curves.
+  ui.Path _distantRidgePath(double w, double h) {
+    final path = ui.Path();
+    switch (_horizonKind) {
+      case _HorizonKind.mountain:
+        path
+          ..moveTo(0, h * .53)
+          ..lineTo(w * .08, h * .43)
+          ..lineTo(w * .18, h * .49)
+          ..lineTo(w * .31, h * .38)
+          ..lineTo(w * .45, h * .50)
+          ..lineTo(w * .58, h * .42)
+          ..lineTo(w * .72, h * .48)
+          ..lineTo(w * .86, h * .40)
+          ..lineTo(w, h * .50);
+      case _HorizonKind.dune:
+        path
+          ..moveTo(0, h * .51)
+          ..quadraticBezierTo(w * .19, h * .44, w * .36, h * .50)
+          ..quadraticBezierTo(w * .54, h * .56, w * .71, h * .47)
+          ..quadraticBezierTo(w * .88, h * .41, w, h * .49);
+      case _HorizonKind.skyline:
+        path.moveTo(0, h * .55);
+        var x = 0.0;
+        var t = 0;
+        while (x < w) {
+          final tw = w * (.05 + (t % 4) * .018);
+          final top = h * (.50 - (t * 11 % 13) / 100);
+          path
+            ..lineTo(x, top)
+            ..lineTo(x + tw, top);
+          x += tw;
+          t++;
+        }
+        path.lineTo(w, h * .55);
+      case _HorizonKind.coast:
+        path
+          ..moveTo(0, h * .525)
+          ..quadraticBezierTo(w * .24, h * .485, w * .48, h * .515)
+          ..quadraticBezierTo(w * .72, h * .545, w, h * .50);
+      case _HorizonKind.canopy:
+        path.moveTo(0, h * .525);
+        for (var i = 0; i < 7; i++) {
+          path.quadraticBezierTo(
+            w * (i + .5) / 7,
+            h * (.44 + (i % 3) * .018),
+            w * (i + 1) / 7,
+            h * (.515 + (i % 2) * .010),
+          );
+        }
+      case _HorizonKind.riverPlain:
+        path
+          ..moveTo(0, h * .525)
+          ..quadraticBezierTo(w * .32, h * .490, w * .57, h * .515)
+          ..quadraticBezierTo(w * .80, h * .535, w, h * .50);
+      case _HorizonKind.woodedRidge:
+        path
+          ..moveTo(0, h * .52)
+          ..lineTo(w * .14, h * .44)
+          ..lineTo(w * .24, h * .50)
+          ..lineTo(w * .40, h * .42)
+          ..lineTo(w * .55, h * .50)
+          ..lineTo(w * .71, h * .43)
+          ..lineTo(w * .84, h * .49)
+          ..lineTo(w, h * .42);
+    }
+    return path
+      ..lineTo(w, h * .57)
+      ..lineTo(0, h * .57)
+      ..close();
+  }
+
+  /// Ridge line for the very furthest layer.
+  ///
+  /// Higher and more angular than [_distantRidgePath] so two overlapping
+  /// silhouettes read as two distinct distances.
+  ui.Path _furthestRidgePath(double w, double h) {
+    final path = ui.Path();
+    switch (_horizonKind) {
+      case _HorizonKind.mountain:
+        path
+          ..moveTo(0, h * .47)
+          ..lineTo(w * .12, h * .39)
+          ..lineTo(w * .26, h * .45)
+          ..lineTo(w * .40, h * .36)
+          ..lineTo(w * .56, h * .46)
+          ..lineTo(w * .70, h * .40)
+          ..lineTo(w * .84, h * .44)
+          ..lineTo(w, h * .42);
+      case _HorizonKind.dune:
+        path
+          ..moveTo(0, h * .47)
+          ..quadraticBezierTo(w * .23, h * .42, w * .44, h * .47)
+          ..quadraticBezierTo(w * .68, h * .50, w, h * .45);
+      case _HorizonKind.skyline:
+        path.moveTo(0, h * .49);
+        var x = 0.0;
+        var t = 0;
+        while (x < w) {
+          final tw = w * (.055 + (t % 3) * .020);
+          final top = h * (.46 - (t * 9 % 10) / 100);
+          path
+            ..lineTo(x, top)
+            ..lineTo(x + tw, top);
+          x += tw;
+          t++;
+        }
+        path.lineTo(w, h * .49);
+      case _HorizonKind.coast:
+        path
+          ..moveTo(0, h * .475)
+          ..quadraticBezierTo(w * .28, h * .445, w * .55, h * .470)
+          ..quadraticBezierTo(w * .78, h * .488, w, h * .455);
+      case _HorizonKind.canopy:
+        path.moveTo(0, h * .475);
+        for (var i = 0; i < 6; i++) {
+          path.quadraticBezierTo(
+            w * (i + .5) / 6,
+            h * (.41 + (i % 3) * .014),
+            w * (i + 1) / 6,
+            h * (.470 + (i % 2) * .010),
+          );
+        }
+      case _HorizonKind.riverPlain:
+        path
+          ..moveTo(0, h * .475)
+          ..quadraticBezierTo(w * .35, h * .450, w * .60, h * .470)
+          ..quadraticBezierTo(w * .82, h * .482, w, h * .455);
+      case _HorizonKind.woodedRidge:
+        path
+          ..moveTo(0, h * .47)
+          ..lineTo(w * .16, h * .40)
+          ..lineTo(w * .28, h * .45)
+          ..lineTo(w * .44, h * .38)
+          ..lineTo(w * .60, h * .455)
+          ..lineTo(w * .76, h * .40)
+          ..lineTo(w * .88, h * .445)
+          ..lineTo(w, h * .40);
+    }
+    return path
+      ..lineTo(w, h * .52)
+      ..lineTo(0, h * .52)
+      ..close();
+  }
+
+    // ───────────────────────────────────────────────────────────────────────────
+  // Ground path — a winding road that recedes toward the horizon
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /// Draws a winding path from the horizon down to the character's feet.
+  ///
+  /// The path's shape varies per city via a stable seed, so two cities in the
+  /// same biome don't share the same road. Colour and texture vary by biome
+  /// and weather.
+  void _drawGroundPath(ui.Canvas canvas, double w, double h) {
+    // Seed determines the bend direction and the two control points that
+    // make the path wind rather than run straight. Same seed per city, so
+    // the road is the same road on every visit.
+    final seed = worldLocationSeed(location);
+    final rng = math.Random(seed ^ 0x3A21);
+    final bend = (rng.nextDouble() - .5) * .24; // -0.12 .. +0.12 in w fractions
+    final midBend = (rng.nextDouble() - .5) * .16;
+
+    // Path narrows as it recedes: from ~30% of scene width at the feet to
+    // ~8% at the horizon. That ratio is what makes a flat surface read as
+    // distance.
+    final topY = h * .57;
+    final botY = h * .92;
+    final topHalfW = w * .04;
+    final botHalfW = w * .15;
+    final topCenterX = w * (.50 + bend * .5);
+    final botCenterX = w * (.50 + midBend);
+
+    final leftEdge = ui.Path()
+      ..moveTo(topCenterX - topHalfW, topY)
+      ..quadraticBezierTo(
+        w * (.50 + bend * .25) - topHalfW * 2.6,
+        h * .73,
+        botCenterX - botHalfW,
+        botY,
+      );
+    final rightEdge = ui.Path()
+      ..moveTo(topCenterX + topHalfW, topY)
+      ..quadraticBezierTo(
+        w * (.50 + bend * .25) + topHalfW * 2.6,
+        h * .73,
+        botCenterX + botHalfW,
+        botY,
+      );
+
+    // Fill: sample colours from the biome, then shift for weather.
+    final pathTone = _pathColourForBiome();
+    final pathFill = ui.Path()
+      ..moveTo(topCenterX - topHalfW, topY)
+      ..lineTo(topCenterX + topHalfW, topY)
+      ..quadraticBezierTo(
+        w * (.50 + bend * .25) + topHalfW * 2.6,
+        h * .73,
+        botCenterX + botHalfW,
+        botY,
+      )
+      ..lineTo(botCenterX - botHalfW, botY)
+      ..quadraticBezierTo(
+        w * (.50 + bend * .25) - topHalfW * 2.6,
+        h * .73,
+        topCenterX - topHalfW,
+        topY,
+      )
+      ..close();
+    canvas.drawPath(pathFill, ui.Paint()..color = pathTone);
+
+    // Ruts, cobbles, or sand ripples along the path. Detail only matters
+    // near the bottom where the pixel size is largest, so this fades toward
+    // the horizon and stops mid-path.
+    _drawPathTexture(canvas, w, h, topCenterX, botCenterX, topHalfW, botHalfW,
+        topY, botY, pathTone);
+
+    // Edges: a darker rim on both sides of the path adds the sense of a
+    // cut or curb. On the bottom half only, since the top half is thin.
+    final edge = pathTone.withAlpha(190);
+    canvas.drawPath(
+      leftEdge,
+      ui.Paint()
+        ..color = edge
+        ..style = ui.PaintingStyle.stroke
+        ..strokeWidth = math.max(1.2, w * .0035),
+    );
+    canvas.drawPath(
+      rightEdge,
+      ui.Paint()
+        ..color = edge
+        ..style = ui.PaintingStyle.stroke
+        ..strokeWidth = math.max(1.2, w * .0035),
+    );
+  }
+
+  /// Base tone for the path, derived from the current biome and weather.
+  ui.Color _pathColourForBiome() {
+    // Wet weather darkens everything.
+    final wetness = _rain ? .75 : 1.0;
+    final snowCover = _snow || _winterWorld;
+    if (snowCover) {
+      return _storm
+          ? const ui.Color(0xFF9AACB0)
+          : const ui.Color(0xFFD6E0E4);
+    }
+    switch (location.biome) {
+      case WorldBiome.desert:
+      case WorldBiome.coldDesert:
+        return (const ui.Color(0xFFB58549)).withValues(
+            alpha: wetness);
+      case WorldBiome.urban:
+        return (const ui.Color(0xFF5E5A57)).withValues(alpha: wetness);
+      case WorldBiome.coastal:
+        return (const ui.Color(0xFFA07952)).withValues(alpha: wetness);
+      case WorldBiome.mountain:
+        return (const ui.Color(0xFF6E675E)).withValues(alpha: wetness);
+      case WorldBiome.river:
+        return (const ui.Color(0xFF8A6B48)).withValues(alpha: wetness);
+      case WorldBiome.tropical:
+      case WorldBiome.temperate:
+        return (const ui.Color(0xFF6B573B)).withValues(alpha: wetness);
+    }
+  }
+
+  /// Weather-and-biome-aware texture on the path.
+  ///
+  /// Only draws in the near half of the path — the far half is too compressed
+  /// for detail to read, and painting it makes the path look busy rather than
+  /// distant.
+  void _drawPathTexture(
+    ui.Canvas canvas,
+    double w,
+    double h,
+    double topCenterX,
+    double botCenterX,
+    double topHalfW,
+    double botHalfW,
+    double topY,
+    double botY,
+    ui.Color baseTone,
+  ) {
+    final seed = worldLocationSeed(location);
+    final rng = math.Random(seed ^ 0xCAFE);
+
+    // Interpolates along the path from t=0 (horizon) to t=1 (feet).
+    double pathCenterAt(double t) =>
+        topCenterX + (botCenterX - topCenterX) * t;
+    double pathHalfWAt(double t) => topHalfW + (botHalfW - topHalfW) * t;
+    double pathYAt(double t) => topY + (botY - topY) * t;
+
+    final isUrban = location.biome == WorldBiome.urban;
+    final isDesert = location.biome == WorldBiome.desert ||
+        location.biome == WorldBiome.coldDesert;
+
+    if (isUrban) {
+      // Cobblestone tiles across the near half of the path.
+      final tileCount = 24;
+      for (var i = 0; i < tileCount; i++) {
+        final t = .35 + rng.nextDouble() * .60;
+        final cx = pathCenterAt(t) + (rng.nextDouble() - .5) * pathHalfWAt(t) * 1.8;
+        final cy = pathYAt(t);
+        final r = math.max(1.0, (1 - t) * 4.5 + 1.0);
+        // Slight colour variance per stone.
+        final shade = baseTone.withValues(
+            alpha: 1.0, red: (baseTone.r * 255 + rng.nextInt(30) - 15).clamp(0, 255).toInt() / 255);
+        canvas.drawCircle(
+          ui.Offset(cx, cy),
+          r,
+          ui.Paint()..color = shade.withAlpha(180),
+        );
+      }
+      return;
+    }
+
+    if (isDesert) {
+      // Faint wind ripples — short horizontal dashes.
+      for (var i = 0; i < 20; i++) {
+        final t = .35 + rng.nextDouble() * .60;
+        final cx = pathCenterAt(t) +
+            (rng.nextDouble() - .5) * pathHalfWAt(t) * 1.4;
+        final cy = pathYAt(t);
+        final length = pathHalfWAt(t) * (.15 + rng.nextDouble() * .20);
+        _rect(canvas, cx - length / 2, cy, length, math.max(1.0, (1 - t) * 1.6),
+            baseTone.withAlpha(150));
+      }
+      return;
+    }
+
+    // Rural: wheel ruts running along the path plus scattered pebbles.
+    final rutCount = 2;
+    for (var rut = 0; rut < rutCount; rut++) {
+      // Ruts run from ~60% down to the feet, offset from the center.
+      final offsetSign = rut == 0 ? -1.0 : 1.0;
+      final rutPath = ui.Path();
+      for (var step = 0; step <= 20; step++) {
+        final t = .55 + (step / 20) * .44;
+        final cx = pathCenterAt(t) + offsetSign * pathHalfWAt(t) * .55;
+        final cy = pathYAt(t);
+        if (step == 0) {
+          rutPath.moveTo(cx, cy);
+        } else {
+          rutPath.lineTo(cx, cy);
+        }
+      }
+      canvas.drawPath(
+        rutPath,
+        ui.Paint()
+          ..color = baseTone.withAlpha(190)
+          ..style = ui.PaintingStyle.stroke
+          ..strokeWidth = math.max(1.2, w * .0035),
+      );
+    }
+    // Pebbles scattered along the near half.
+    for (var i = 0; i < 10; i++) {
+      final t = .55 + rng.nextDouble() * .40;
+      final cx = pathCenterAt(t) + (rng.nextDouble() - .5) * pathHalfWAt(t) * 1.4;
+      final cy = pathYAt(t);
+      final r = math.max(0.8, (1 - t) * 2.4 + .5);
+      canvas.drawCircle(ui.Offset(cx, cy), r,
+          ui.Paint()..color = baseTone.withAlpha(150));
     }
   }
 
@@ -2613,7 +4279,7 @@ class WeatherSceneGame extends FlameGame with TapCallbacks, LongPressCallbacks {
         ..lineTo(right, baseY)
         ..close();
       canvas.drawPath(mountain,
-          ui.Paint()..color = const ui.Color(0xFF596D72).withOpacity(.72));
+          ui.Paint()..color = const ui.Color(0xFF596D72).withValues(alpha: .72));
       if (snowy) {
         final cap = ui.Path()
           ..moveTo(peak - w * .055, peakY + h * .095)
@@ -2650,8 +4316,21 @@ class WeatherSceneGame extends FlameGame with TapCallbacks, LongPressCallbacks {
     }
   }
 
+  /// Regional fallback scene for cities without a catalogued landmark.
+  ///
+  /// Every biome now varies by city: the climate zone selects the tree
+  /// species, and a per-location seed varies how many trees are drawn, how
+  /// tall they are, and the exact tint of the skyline or canopy. Two temperate
+  /// towns no longer render as the same field of identical trees.
   void _drawRegionalFallback(ui.Canvas canvas, double w, double h,
       ui.Color stone, ui.Color darkStone, ui.Color water) {
+    final climate = location.climate;
+    final tree = location.defaultTree;
+    final seed = worldLocationSeed(location);
+    final rng = math.Random(seed);
+    final treeCount = 5 + rng.nextInt(4);
+    final spanW = 0.94 / treeCount;
+
     switch (location.biome) {
       case WorldBiome.desert:
         final dune = ui.Path()
@@ -2662,72 +4341,83 @@ class WeatherSceneGame extends FlameGame with TapCallbacks, LongPressCallbacks {
           ..lineTo(0, h)
           ..close();
         canvas.drawPath(dune, ui.Paint()..color = const ui.Color(0xFFD6A157));
-        for (var i = 0; i < 3; i++) {
-          final x = w * (.12 + i * .34);
-          _rect(canvas, x, h * .55, w * .018, h * .16,
-              const ui.Color(0xFF705136));
-          _rect(canvas, x - w * .04, h * .53, w * .10, h * .015,
-              const ui.Color(0xFF477046));
+        for (var i = 0; i < treeCount; i++) {
+          final x = w * (0.05 + i * spanW + rng.nextDouble() * 0.02);
+          final treeW = w * (.08 + rng.nextDouble() * .05);
+          final treeH = h * (.14 + rng.nextDouble() * .06);
+          _drawClimateTree(canvas, x, h * .72, treeW, treeH, tree);
         }
       case WorldBiome.coldDesert:
       case WorldBiome.mountain:
         _drawMountainRange(canvas, w, h, _snow || _winterWorld);
-        for (var i = 0; i < 4; i++) {
-          _drawPixelTree(canvas, w * (.08 + i * .25), h * .68, w * .13, h * .25,
-              const ui.Color(0xFF28513E), _snow || _winterWorld);
+        for (var i = 0; i < treeCount; i++) {
+          final x = w * (0.05 + i * spanW + rng.nextDouble() * 0.02);
+          final treeW = w * (.10 + rng.nextDouble() * .06);
+          final treeH = h * (.20 + rng.nextDouble() * .10);
+          _drawClimateTree(canvas, x, h * .70, treeW, treeH,
+              climate == ClimateZone.alpine ? TreeSpecies.pine : tree,
+              snowy: _snow || _winterWorld);
         }
       case WorldBiome.coastal:
         _rect(canvas, 0, h * .65, w, h * .30, water);
         for (var i = 0; i < 5; i++) {
-          _rect(canvas, w * (.05 + i * .10), h * (.72 + (i % 2) * .05), w * .09,
-              h * .005, const ui.Color(0x887ED9D6));
+          _rect(canvas, w * (.05 + i * .10), h * (.72 + (i % 2) * .05),
+              w * .09, h * .005, const ui.Color(0x887ED9D6));
         }
-        for (var i = 0; i < 3; i++) {
-          final x = w * (.20 + i * .28);
-          _rect(canvas, x, h * .43, w * .018, h * .24,
-              const ui.Color(0xFF69462E));
-          _rect(canvas, x - w * .07, h * .41, w * .15, h * .02,
-              const ui.Color(0xFF2E7049));
+        for (var i = 0; i < treeCount; i++) {
+          final x = w * (0.06 + i * spanW + rng.nextDouble() * 0.02);
+          final treeW = w * (.09 + rng.nextDouble() * .05);
+          final treeH = h * (.16 + rng.nextDouble() * .07);
+          _drawClimateTree(canvas, x, h * .66, treeW, treeH, tree,
+              autumn: _autumnWorld, spring: _springWorld);
         }
       case WorldBiome.river:
         _rect(canvas, 0, h * .68, w, h * .27, water);
         _rect(canvas, w * .06, h * .56, w * .88, h * .018, stone);
-        for (var i = 0; i < 4; i++) {
-          final x = w * (.08 + i * .23);
-          _rect(canvas, x, h * .43, w * .14, h * .13, stone);
-          _rect(canvas, x - w * .012, h * .40, w * .165, h * .035, darkStone);
+        for (var i = 0; i < treeCount; i++) {
+          final x = w * (0.06 + i * spanW + rng.nextDouble() * 0.02);
+          final treeW = w * (.09 + rng.nextDouble() * .05);
+          final treeH = h * (.18 + rng.nextDouble() * .08);
+          _drawClimateTree(canvas, x, h * .68, treeW, treeH, tree,
+              autumn: _autumnWorld, spring: _springWorld,
+              snowy: _snow || _winterWorld);
         }
       case WorldBiome.urban:
+        // A skyline that varies in height, massing, and colour by city seed.
+        final baseHue = 0xFF596779 + (rng.nextInt(0x18) << 8) - 0x0C00;
         for (var i = 0; i < 8; i++) {
           final x = w * (.02 + i * .12);
-          final buildingH = h * (.14 + (i * 5 % 17) / 100);
+          final buildingH = h * (.13 + ((i * 5 + rng.nextInt(11)) % 18) / 100);
+          final color = ui.Color(baseHue).withValues(
+              alpha: 1.0 - (i % 3) * 0.08);
           _rect(canvas, x, h * .66 - buildingH, w * .10, buildingH,
-              i.isEven ? stone : darkStone);
+              i.isEven ? color : stone);
           for (var row = 0; row < 3; row++) {
-            _rect(canvas, x + w * .025, h * .53 + row * h * .035, w * .018,
-                h * .014, const ui.Color(0xFFFFD58A));
+            _rect(canvas, x + w * .025, h * .53 + row * h * .035,
+                w * .018, h * .014, const ui.Color(0xFFFFD58A));
           }
         }
       case WorldBiome.tropical:
-        for (var i = 0; i < 6; i++) {
-          final x = w * (.05 + i * .18);
-          _rect(canvas, x + w * .045, h * .43, w * .015, h * .27,
-              const ui.Color(0xFF68452D));
-          for (var f = -2; f <= 2; f++) {
-            final frond = ui.Path()
-              ..moveTo(x + w * .05, h * .45)
-              ..lineTo(x + w * (.05 + f * .055), h * (.37 + f.abs() * .02));
-            canvas.drawPath(
-                frond,
-                ui.Paint()
-                  ..color = const ui.Color(0xFF28734A)
-                  ..strokeWidth = 3);
-          }
+        // Palms along a shore, varying count and height per city.
+        _rect(canvas, 0, h * .78, w, h * .22, water);
+        _rect(canvas, 0, h * .78, w, h * .008, const ui.Color(0xFF9FBFB3));
+        for (var i = 0; i < treeCount; i++) {
+          final x = w * (0.05 + i * spanW + rng.nextDouble() * 0.02);
+          final treeW = w * (.09 + rng.nextDouble() * .05);
+          final treeH = h * (.20 + rng.nextDouble() * .08);
+          _drawClimateTree(canvas, x, h * .78, treeW, treeH,
+              TreeSpecies.palm);
         }
       case WorldBiome.temperate:
-        for (var i = 0; i < 7; i++) {
-          _drawPixelTree(canvas, w * (.02 + i * .15), h * .67, w * .14, h * .26,
-              const ui.Color(0xFF2E6445), _snow || _winterWorld);
+        // The one the user complained about. Now varies by species, count,
+        // height, and colour so two temperate cities do not look the same.
+        for (var i = 0; i < treeCount; i++) {
+          final x = w * (0.04 + i * spanW + rng.nextDouble() * 0.02);
+          final treeW = w * (.10 + rng.nextDouble() * .06);
+          final treeH = h * (.18 + rng.nextDouble() * .10);
+          _drawClimateTree(canvas, x, h * .70, treeW, treeH, tree,
+              autumn: _autumnWorld, spring: _springWorld,
+              snowy: _snow || _winterWorld);
         }
     }
   }
@@ -3420,7 +5110,7 @@ class WeatherSceneGame extends FlameGame with TapCallbacks, LongPressCallbacks {
             width: radius * (1 + age * 2),
             height: radius * (.35 + age * .3)),
         ui.Paint()
-          ..color = const ui.Color(0x885DB8CE).withOpacity((1 - age) * .42)
+          ..color = const ui.Color(0x885DB8CE).withValues(alpha: (1 - age) * .42)
           ..style = ui.PaintingStyle.stroke
           ..strokeWidth = .8,
       );

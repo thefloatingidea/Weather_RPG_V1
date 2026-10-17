@@ -176,17 +176,14 @@ void main() {
     expect(restored.visitedLocations, {'agra', 'jaipur'});
     expect(restored.visitCounts, {'agra': 2, 'jaipur': 1});
 
-    final legacyProfile = CharacterProfile.fromJson({
-      ...returned.profile.toJson(),
-      'temperament': {
-        'curiosity': 0,
-        'playfulness': 0,
-        'caution': 1,
-        'sleepiness': 1,
-      },
-    });
+    final legacyJson = Map<String, dynamic>.from(returned.profile.toJson())
+      ..remove('schemaVersion')
+      ..remove('temperament');
+    final legacyProfile = CharacterProfile.fromJson(legacyJson);
     expect(legacyProfile.temperament.curiosity, .72);
     expect(legacyProfile.temperament.playfulness, .64);
-    expect(legacyProfile.toJson(), isNot(contains('temperament')));
+    expect(legacyProfile.toJson()['schemaVersion'],
+        CharacterProfile.currentSchemaVersion);
+    expect(legacyProfile.toJson(), contains('temperament'));
   });
 }

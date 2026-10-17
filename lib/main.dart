@@ -1,12 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'widgets/weather_error_view.dart';
 
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:http/http.dart' as http;
 import 'weather_scene.dart';
 import 'goblin_sprites.dart';
 import 'weather_models.dart';
@@ -16,7 +15,7 @@ import 'character_behavior.dart';
 import 'weather_api.dart';
 import 'goblin_scenarios.dart';
 
-void main() => runApp(const ProviderScope(child: WeatherRpgApp()));
+void main() => runApp(const WeatherRpgApp());
 const Color night = Color(0xFF17121A);
 const Color panel = Color(0xFF2B2027);
 const Color panel2 = Color(0xFF3A2926);
@@ -390,13 +389,13 @@ class _NicknameDialogState extends State<_NicknameDialog> {
   }
 }
 
-class WeatherRpgApp extends ConsumerStatefulWidget {
+class WeatherRpgApp extends StatefulWidget {
   const WeatherRpgApp({super.key});
   @override
-  ConsumerState<WeatherRpgApp> createState() => _WeatherRpgAppState();
+  State<WeatherRpgApp> createState() => _WeatherRpgAppState();
 }
 
-class _WeatherRpgAppState extends ConsumerState<WeatherRpgApp> {
+class _WeatherRpgAppState extends State<WeatherRpgApp> {
   ThemeMode themeMode = ThemeMode.dark;
   final SharedPreferencesAsync _prefs = SharedPreferencesAsync();
 
@@ -469,7 +468,7 @@ class _WeatherRpgAppState extends ConsumerState<WeatherRpgApp> {
   }
 }
 
-class WeatherHome extends ConsumerStatefulWidget {
+class WeatherHome extends StatefulWidget {
   final ValueChanged<ThemeMode> onThemeChanged;
   final ThemeMode themeMode;
   const WeatherHome({
@@ -478,10 +477,10 @@ class WeatherHome extends ConsumerStatefulWidget {
     required this.themeMode,
   });
   @override
-  ConsumerState<WeatherHome> createState() => _WeatherHomeState();
+  State<WeatherHome> createState() => _WeatherHomeState();
 }
 
-class _WeatherHomeState extends ConsumerState<WeatherHome>
+class _WeatherHomeState extends State<WeatherHome>
     with TickerProviderStateMixin {
   late final AnimationController _weatherAnimation;
   WeatherBundle? _weather;
@@ -886,13 +885,12 @@ final WeatherApiClient _weatherApi = const WeatherApiClient();
     }
   }
 
-  Future<PlaceResult?> _geocode(String query) async {
-    if (query.trim().isEmpty) return null;
+  Future<List<PlaceResult>> _searchCities(String query) async {
+    if (query.trim().isEmpty) return const [];
     try {
-      final results = await _weatherApi.search(query);
-      return results.isEmpty ? null : results.first;
+      return await _weatherApi.search(query);
     } catch (_) {
-      return null;
+      return const [];
     }
   }
 
@@ -905,7 +903,7 @@ final WeatherApiClient _weatherApi = const WeatherApiClient();
     final result = await Navigator.of(context).push<PlaceResult>(
       MaterialPageRoute<PlaceResult>(
         builder: (_) => CitySearchPage(
-          searchCity: _geocode,
+          searchCities: _searchCities,
           backgroundTop: palette.backgroundTop,
           backgroundBottom: palette.backgroundBottom,
           frameTop: palette.frameTop,
@@ -1203,11 +1201,11 @@ final WeatherApiClient _weatherApi = const WeatherApiClient();
           borderRadius: BorderRadius.circular(7),
           boxShadow: [
             BoxShadow(
-                color: palette.backgroundTop.withOpacity(.72),
+                color: palette.backgroundTop.withValues(alpha: .72),
                 offset: Offset(0, 4),
                 blurRadius: 8),
             BoxShadow(
-                color: palette.botanical.withOpacity(.22),
+                color: palette.botanical.withValues(alpha: .22),
                 offset: Offset(-3, 0),
                 blurRadius: 5),
           ],
@@ -1229,7 +1227,7 @@ final WeatherApiClient _weatherApi = const WeatherApiClient();
                 borderRadius: BorderRadius.circular(22),
                 boxShadow: [
                   BoxShadow(
-                      color: palette.highlight.withOpacity(.36),
+                      color: palette.highlight.withValues(alpha: .36),
                       blurRadius: 12),
                 ],
               ),
@@ -1398,7 +1396,7 @@ final WeatherApiClient _weatherApi = const WeatherApiClient();
                     Text(
                       "GOBLIN'S WEATHER MINI-SCENE",
                       style: TextStyle(
-                        color: palette.frameBottom.withOpacity(.72),
+                        color: palette.frameBottom.withValues(alpha: .72),
                         fontSize: 9,
                         fontWeight: FontWeight.w900,
                         letterSpacing: .9,
@@ -1450,7 +1448,7 @@ Text(
             borderRadius: BorderRadius.circular(7),
             boxShadow: [
               BoxShadow(
-                  color: palette.backgroundTop.withOpacity(.75),
+                  color: palette.backgroundTop.withValues(alpha: .75),
                   offset: Offset(0, 5),
                   blurRadius: 10),
             ],
@@ -1563,7 +1561,7 @@ Text(
                         )),
                     Text('Feels like $feels$_unit',
                         style: TextStyle(
-                            color: palette.frameBottom.withOpacity(.78),
+                            color: palette.frameBottom.withValues(alpha: .78),
                             fontSize: 12)),
                   ],
                 ),
@@ -1643,13 +1641,16 @@ Text(
   }) {
     if (summerClear) return 'SUNLIT LANDSCAPE';
     if ([95, 96, 99].contains(code)) return 'THUNDERSTORM SKY';
-    if (const [30, 31, 32, 33, 34, 35].contains(code) && _worldLocation.isArid)
+    if (const [30, 31, 32, 33, 34, 35].contains(code) && _worldLocation.isArid) {
       return 'DUSTY DESERT';
+    }
     if ([71, 73, 75, 77, 85, 86].contains(code)) return 'SNOWY LANDSCAPE';
     if ([45, 48].contains(code)) return 'FOGGY LANDSCAPE';
     if (code == 3) return 'OVERCAST LANDSCAPE';
     if ([51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82, 95, 96, 99]
-        .contains(code)) return 'RAINY LANDSCAPE';
+        .contains(code)) {
+      return 'RAINY LANDSCAPE';
+    }
     if (windKmh >= strongWindThresholdKmh) return 'WIND-SWEPT LANDSCAPE';
     if ([0, 1, 2].contains(code)) {
       return isDay ? 'SUNLIT LANDSCAPE' : 'MOONLIT LANDSCAPE';
@@ -1672,7 +1673,7 @@ Text(
             borderRadius: BorderRadius.circular(5),
             boxShadow: [
               BoxShadow(
-                  color: palette.backgroundTop.withOpacity(.65),
+                  color: palette.backgroundTop.withValues(alpha: .65),
                   offset: Offset(0, 3),
                   blurRadius: 5),
             ],
@@ -1705,7 +1706,7 @@ Text(
   Widget _weatherStatusBanner(_WeatherMenuPalette palette) => Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
         decoration: BoxDecoration(
-          color: palette.surface.withOpacity(.94),
+          color: palette.surface.withValues(alpha: .94),
           border: Border.all(
             color: _error == null ? palette.edge : palette.danger,
           ),
@@ -1759,7 +1760,7 @@ Text(
       Container(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
         decoration: BoxDecoration(
-          color: palette.backgroundTop.withOpacity(.92),
+          color: palette.backgroundTop.withValues(alpha: .92),
           border: Border.all(color: palette.edge),
           borderRadius: BorderRadius.circular(3),
         ),
@@ -1800,7 +1801,7 @@ Text(
         borderRadius: BorderRadius.circular(5),
         boxShadow: [
           BoxShadow(
-            color: palette.backgroundTop.withOpacity(.72),
+            color: palette.backgroundTop.withValues(alpha: .72),
             blurRadius: 7,
             offset: const Offset(0, 4),
           ),
@@ -1829,7 +1830,7 @@ Text(
         borderRadius: BorderRadius.circular(5),
         boxShadow: [
           BoxShadow(
-              color: palette.backgroundTop.withOpacity(.60),
+              color: palette.backgroundTop.withValues(alpha: .60),
               offset: Offset(0, 3),
               blurRadius: 5),
         ],
@@ -1889,7 +1890,7 @@ Text(
         borderRadius: BorderRadius.circular(5),
         boxShadow: [
           BoxShadow(
-              color: palette.backgroundTop.withOpacity(.64),
+              color: palette.backgroundTop.withValues(alpha: .64),
               offset: Offset(0, 3),
               blurRadius: 5),
         ],
@@ -1992,7 +1993,7 @@ Text(
               borderRadius: BorderRadius.circular(4),
               boxShadow: [
                 BoxShadow(
-                    color: palette.backgroundTop.withOpacity(.45),
+                    color: palette.backgroundTop.withValues(alpha: .45),
                     offset: Offset(0, 2),
                     blurRadius: 4),
               ],
@@ -2713,7 +2714,7 @@ Text(
         ),
         boxShadow: [
           BoxShadow(
-              color: palette.backgroundTop.withOpacity(.68),
+              color: palette.backgroundTop.withValues(alpha: .68),
               offset: Offset(0, -3),
               blurRadius: 7),
         ],
@@ -2740,7 +2741,7 @@ Text(
                     boxShadow: active
                         ? [
                             BoxShadow(
-                                color: palette.highlight.withOpacity(.18),
+                                color: palette.highlight.withValues(alpha: .18),
                                 blurRadius: 9)
                           ]
                         : [],
@@ -2831,7 +2832,7 @@ class _ForestBackdropPainter extends CustomPainter {
     );
 
     final motifPaint = Paint()
-      ..color = palette.accent.withOpacity(.10)
+      ..color = palette.accent.withValues(alpha: .10)
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1.4;
     if (palette.mood == 'heat' || palette.mood == 'sandstorm') {
@@ -2860,7 +2861,7 @@ class _ForestBackdropPainter extends CustomPainter {
     }
     if (palette.mood == 'cold') {
       final frostPaint = Paint()
-        ..color = palette.highlight.withOpacity(.10)
+        ..color = palette.highlight.withValues(alpha: .10)
         ..strokeWidth = 1;
       for (var i = 0; i < 12; i++) {
         final x = size.width * ((i * 37 % 100) / 100);
@@ -2885,7 +2886,7 @@ class _ForestBackdropPainter extends CustomPainter {
       return;
     }
 
-    final barkColor = palette.frameBottom.withOpacity(.18);
+    final barkColor = palette.frameBottom.withValues(alpha: .18);
     final branchPaint = Paint()
       ..color = barkColor
       ..strokeWidth = 8
@@ -2906,7 +2907,7 @@ class _ForestBackdropPainter extends CustomPainter {
     canvas.drawPath(leftBranch, branchPaint);
     canvas.drawPath(rightBranch, branchPaint);
 
-    final leafColor = palette.botanical.withOpacity(.20);
+    final leafColor = palette.botanical.withValues(alpha: .20);
     for (var i = 0; i < 18; i++) {
       final left = i.isEven;
       final x =
@@ -3006,7 +3007,7 @@ class _MenuParticlePainter extends CustomPainter {
       canvas.drawCircle(
         Offset(x, y),
         radius,
-        Paint()..color = palette.highlight.withOpacity(.62),
+        Paint()..color = palette.highlight.withValues(alpha: .62),
       );
     }
   }
@@ -3019,7 +3020,7 @@ class _MenuParticlePainter extends CustomPainter {
             ? 14
             : (14 + precipitation * 5).round().clamp(14, 42);
     final paint = Paint()
-      ..color = palette.accent.withOpacity(.34)
+      ..color = palette.accent.withValues(alpha: .34)
       ..strokeWidth = storm
           ? 1.3
           : density > 26
@@ -3038,7 +3039,7 @@ class _MenuParticlePainter extends CustomPainter {
   void _drawCyclone(Canvas canvas, Size size, double phase) {
     final center = Offset(size.width * .50, size.height * .57);
     final paint = Paint()
-      ..color = palette.accent.withOpacity(.34)
+      ..color = palette.accent.withValues(alpha: .34)
       ..strokeWidth = 1.2
       ..strokeCap = StrokeCap.round;
     for (var i = 0; i < 26; i++) {
@@ -3054,7 +3055,7 @@ class _MenuParticlePainter extends CustomPainter {
 
   void _drawSand(Canvas canvas, Size size, double phase) {
     final paint = Paint()
-      ..color = palette.highlight.withOpacity(.40)
+      ..color = palette.highlight.withValues(alpha: .40)
       ..strokeWidth = 1.3
       ..strokeCap = StrokeCap.round;
     for (var i = 0; i < 34; i++) {
@@ -3077,7 +3078,7 @@ class _MenuParticlePainter extends CustomPainter {
         Offset(x, y),
         r,
         Paint()
-          ..color = palette.accent.withOpacity(.28)
+          ..color = palette.accent.withValues(alpha: .28)
           ..style = PaintingStyle.stroke
           ..strokeWidth = 1,
       );
@@ -3096,7 +3097,7 @@ class _MenuParticlePainter extends CustomPainter {
         1 + (i % 2) * .5,
         Paint()
           ..color = Color.lerp(palette.accent, palette.highlight, .65)!
-              .withOpacity(alpha / 255),
+              .withValues(alpha: alpha / 255),
       );
     }
   }
@@ -3109,8 +3110,8 @@ class _MenuParticlePainter extends CustomPainter {
       final y = size.height * t;
       final paint = Paint()
         ..color = i.isEven
-            ? palette.highlight.withOpacity(.46)
-            : palette.accent.withOpacity(.40);
+            ? palette.highlight.withValues(alpha: .46)
+            : palette.accent.withValues(alpha: .40);
       canvas.save();
       canvas.translate(x, y);
       canvas.rotate(math.sin(t * 6 + i) * .7);
@@ -3128,8 +3129,8 @@ class _MenuParticlePainter extends CustomPainter {
       final y = size.height * t;
       final paint = Paint()
         ..color = i.isEven
-            ? palette.accent.withOpacity(.54)
-            : palette.highlight.withOpacity(.54);
+            ? palette.accent.withValues(alpha: .54)
+            : palette.highlight.withValues(alpha: .54);
       canvas.save();
       canvas.translate(x, y);
       canvas.rotate(math.sin(t * 7 + i) * 1.1);
@@ -3150,9 +3151,9 @@ class _MenuParticlePainter extends CustomPainter {
               .clamp(0.0, 1.0);
       final x = size.width * _seed(i, 2);
       final y = size.height * (.16 + _seed(i, 6) * .76);
-      final color = palette.highlight.withOpacity(pulse * .4);
+      final color = palette.highlight.withValues(alpha: pulse * .4);
       canvas.drawCircle(
-          Offset(x, y), 3.3, Paint()..color = color.withOpacity(.22));
+          Offset(x, y), 3.3, Paint()..color = color.withValues(alpha: .22));
       canvas.drawCircle(Offset(x, y), 1.1, Paint()..color = color);
     }
   }
@@ -3179,10 +3180,10 @@ class _SceneFrameEtchingPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final screwPaint = Paint()
-      ..color = palette.edge.withOpacity(.8)
+      ..color = palette.edge.withValues(alpha: .8)
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1.3;
-    final screwFill = Paint()..color = palette.frameBottom.withOpacity(.8);
+    final screwFill = Paint()..color = palette.frameBottom.withValues(alpha: .8);
     for (final point in [
       const Offset(9, 9),
       Offset(size.width - 9, 9),
@@ -3195,7 +3196,7 @@ class _SceneFrameEtchingPainter extends CustomPainter {
           point + const Offset(1.3, 0), screwPaint..strokeWidth = .8);
     }
     final etch = Paint()
-      ..color = palette.accent.withOpacity(.30)
+      ..color = palette.accent.withValues(alpha: .30)
       ..strokeWidth = 1.2
       ..style = PaintingStyle.stroke;
     canvas.drawLine(
@@ -3250,7 +3251,7 @@ class RainChartPainter extends CustomPainter {
       fillPath,
       Paint()
         ..shader = LinearGradient(
-          colors: [color.withOpacity(.30), color.withOpacity(.01)],
+          colors: [color.withValues(alpha: .30), color.withValues(alpha: .01)],
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
         ).createShader(Offset.zero & size),

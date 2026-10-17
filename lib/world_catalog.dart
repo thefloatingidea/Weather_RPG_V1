@@ -11,6 +11,24 @@ enum WorldBiome {
   coldDesert,
 }
 
+/// Broad climate bands used to pick vegetation. Derived from latitude and
+/// country, with well-known exceptions overridden. This is a felt sense of
+/// "what grows here", not a scientific Köppen classification.
+enum ClimateZone {
+  tropicalRainforest,
+  tropicalSavanna,
+  subtropicalDesert,
+  mediterranean,
+  temperateDeciduous,
+  boreal,
+  tundra,
+  polar,
+  alpine,
+}
+
+/// What kind of tree should be drawn by default in a given climate.
+enum TreeSpecies { broadleaf, pine, palm, cypress, cactus, shrub, baobab }
+
 enum WorldSeason { spring, summer, autumn, winter }
 
 WorldSeason worldSeasonForMonth(int month, double latitude) {
@@ -81,6 +99,187 @@ class WorldLocation {
   bool get isArid =>
       biome == WorldBiome.desert || biome == WorldBiome.coldDesert;
 }
+
+/// Climate and default tree for a location, derived lazily from its own
+/// coordinates and country. Kept as an extension so existing catalog entries
+/// and the fallback constructor stay untouched.
+extension WorldLocationClimate on WorldLocation {
+  ClimateZone get climate => climateZoneFor(
+        latitude: latitude,
+        country: country,
+        biome: biome,
+      );
+
+  TreeSpecies get defaultTree => defaultTreeFor(climate);
+}
+
+/// Latitude- and country-driven climate zone.
+///
+/// The rules are deliberately simple: country overrides first (because the
+/// well-known cases should not be guessed), then latitude bands. A biome hint
+/// from a catalog entry wins over both when it describes extreme terrain
+/// (desert, cold desert, mountain) that the fallback system cannot know about.
+ClimateZone climateZoneFor({
+  required double latitude,
+  required String country,
+  WorldBiome? biome,
+}) {
+  final normalized = normalizePlaceName(country);
+  bool has(String name) => normalized.contains(name);
+
+  // Catalog biome hints win for extreme terrain.
+  if (biome == WorldBiome.desert) return ClimateZone.subtropicalDesert;
+  if (biome == WorldBiome.coldDesert) return ClimateZone.alpine;
+  if (biome == WorldBiome.mountain) return ClimateZone.alpine;
+
+  // Hot deserts: North Africa, Arabian peninsula, Iranian plateau, US Southwest.
+  if (has('egypt') ||
+      has('libya') ||
+      has('algeria') ||
+      has('morocco') ||
+      has('tunisia') ||
+      has('sudan') ||
+      has('saudi') ||
+      has('emirates') ||
+      has('uae') ||
+      has('qatar') ||
+      has('oman') ||
+      has('kuwait') ||
+      has('bahrain') ||
+      has('iraq') ||
+      has('iran') ||
+      has('yemen') ||
+      has('jordan') ||
+      has('israel') ||
+      has('arizona') ||
+      has('nevada')) {
+    return ClimateZone.subtropicalDesert;
+  }
+
+  // Alpine: high-altitude countries where the mountains dominate the scene.
+  if (has('nepal') ||
+      has('bhutan') ||
+      has('tibet') ||
+      has('mongolia') ||
+      has('kazakhstan') ||
+      has('kyrgyzstan') ||
+      has('tajikistan') ||
+      has('uzbekistan') ||
+      has('switzerland') ||
+      (has('austria') && latitude.abs() > 46)) {
+    return ClimateZone.alpine;
+  }
+
+  // Boreal: far-north countries. Canada is NOT included by default — southern
+  // Canada is temperate deciduous, and only its northern territories reach
+  // boreal, which the latitude check below handles.
+  if (has('norway') ||
+      has('sweden') ||
+      has('finland') ||
+      has('iceland') ||
+      has('russia') ||
+      has('alaska') ||
+      (has('canada') && latitude.abs() >= 55)) {
+    return ClimateZone.boreal;
+  }
+
+  // Tropical belt by country (equatorial and monsoon regions).
+  if (has('singapore') ||
+      has('malaysia') ||
+      has('indonesia') ||
+      has('philippines') ||
+      has('thailand') ||
+      has('vietnam') ||
+      has('cambodia') ||
+      has('laos') ||
+      has('myanmar') ||
+      has('brunei') ||
+      has('sri lanka') ||
+      has('maldives') ||
+      has('kenya') ||
+      has('tanzania') ||
+      has('uganda') ||
+      has('rwanda') ||
+      has('nigeria') ||
+      has('ghana') ||
+      has('ivory coast') ||
+      has('senegal') ||
+      has('cameroon') ||
+      has('congo') ||
+      (has('brazil') && latitude.abs() < 15) ||
+      has('colombia') ||
+      has('venezuela') ||
+      has('ecuador') ||
+      (has('peru') && latitude.abs() < 12) ||
+      has('costa rica') ||
+      has('panama') ||
+      has('nicaragua') ||
+      has('guatemala') ||
+      has('honduras') ||
+      has('belize')) {
+    return ClimateZone.tropicalRainforest;
+  }
+
+  // Mediterranean: dry-summer subtropics. Coastal southern Europe, parts of
+  // California, Chile, South Africa, and southern Australia.
+  if (has('spain') ||
+      has('portugal') ||
+      has('italy') ||
+      has('greece') ||
+      has('croatia') ||
+      has('malta') ||
+      has('cyprus') ||
+      (has('turkey') && latitude.abs() < 40) ||
+      has('lebanon') ||
+      has('syria') ||
+      has('california') ||
+      (has('chile') && latitude.abs() < 38) ||
+      has('south africa') ||
+      (has('australia') &&
+          latitude.abs() >= 30 &&
+          latitude.abs() <= 38)) {
+    return ClimateZone.mediterranean;
+  }
+
+  // Latitude bands as the last resort.
+  final absLat = latitude.abs();
+  if (absLat < 10) return ClimateZone.tropicalRainforest;
+  if (absLat < 20) return ClimateZone.tropicalSavanna;
+  if (absLat < 30) return ClimateZone.subtropicalDesert;
+  if (absLat < 40) return ClimateZone.mediterranean;
+  if (absLat < 55) return ClimateZone.temperateDeciduous;
+  if (absLat < 66) return ClimateZone.boreal;
+  if (absLat < 72) return ClimateZone.tundra;
+  return ClimateZone.polar;
+}
+
+TreeSpecies defaultTreeFor(ClimateZone zone) => switch (zone) {
+      ClimateZone.tropicalRainforest => TreeSpecies.palm,
+      ClimateZone.tropicalSavanna => TreeSpecies.baobab,
+      ClimateZone.subtropicalDesert => TreeSpecies.cactus,
+      ClimateZone.mediterranean => TreeSpecies.cypress,
+      ClimateZone.temperateDeciduous => TreeSpecies.broadleaf,
+      ClimateZone.boreal => TreeSpecies.pine,
+      ClimateZone.tundra => TreeSpecies.shrub,
+      ClimateZone.polar => TreeSpecies.shrub,
+      ClimateZone.alpine => TreeSpecies.pine,
+    };
+
+/// Stable 32-bit seed from a location's id. Used to vary procedural scenery
+/// per city so two temperate towns do not render identically.
+int worldLocationSeed(WorldLocation location) {
+  var hash = 5381;
+  for (final unit in location.id.codeUnits) {
+    hash = ((hash << 5) + hash) ^ unit;
+  }
+  return hash & 0x7FFFFFFF;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Catalog. Climate and tree species are derived lazily from each entry's own
+// coordinates and country, so nothing below needs editing when a new city is
+// added.
+// ─────────────────────────────────────────────────────────────────────────────
 
 const worldLocations = <WorldLocation>[
   WorldLocation(
@@ -372,8 +571,9 @@ class SavedPlace {
 
   bool get hasLabel => label != null && label!.trim().isNotEmpty;
 
-  /// Secondary line. Falls back to the city when [displayName] is a nickname, so
-  /// the nickname and the place name are both visible without repeating either.
+  /// Secondary line. Falls back to the city when [displayName] is a nickname,
+  /// so the nickname and the place name are both visible without repeating
+  /// either.
   String get subtitle {
     if (hasLabel) return city;
     if (region == city || region.trim().isEmpty) return '';
@@ -524,6 +724,13 @@ String landmarkDisplayName(String landmarkId) {
 String normalizePlaceName(String value) =>
     value.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]+'), ' ').trim();
 
+/// Resolves a city into a catalog entry, or constructs a plausible frontier
+/// location from its coordinates and country.
+///
+/// The fallback chain consults country hints and latitude bands via
+/// [climateZoneFor], so a temperate-zone search no longer always ends up in
+/// the same tree-lined field: Cairo gets cacti, Oslo gets pines, Berlin gets
+/// an urban skyline.
 WorldLocation resolveWorldLocation({
   required String city,
   required String region,
@@ -531,11 +738,11 @@ WorldLocation resolveWorldLocation({
   required double longitude,
 }) {
   final normalizedCity = normalizePlaceName(city);
-  final normalizedCountry = normalizePlaceName(region);
+  final normalizedRegion = normalizePlaceName(region);
   for (final location in worldLocations) {
     final aliasMatch = location.aliases
         .any((alias) => normalizePlaceName(alias) == normalizedCity);
-    final countryMatch = normalizedCountry.contains(
+    final countryMatch = normalizedRegion.contains(
       normalizePlaceName(location.country),
     );
     final coordinateMatch = (latitude - location.latitude).abs() <= 1.5 &&
@@ -545,8 +752,10 @@ WorldLocation resolveWorldLocation({
     }
   }
 
-  final normalizedRegion = normalizePlaceName(region);
   final isIndia = normalizedRegion.contains('india');
+
+  // India-specific regions first: they are the app's home turf and deserve
+  // the more precise names.
   if (isIndia &&
       (normalizedRegion.contains('rajasthan') ||
           normalizedRegion.contains('thar'))) {
@@ -577,12 +786,83 @@ WorldLocation resolveWorldLocation({
     return _fallback('regional-tropical', 'Tropical frontier',
         WorldBiome.tropical, latitude, longitude);
   }
-  if (latitude.abs() < 18) {
-    return _fallback('tropical-frontier', 'Tropical frontier',
+
+    // Indo-Gangetic plain and central India. Fertile river plains — the crude
+  // latitude band would otherwise classify all of this as subtropical desert.
+  if (isIndia &&
+      (normalizedRegion.contains('uttar pradesh') ||
+          normalizedRegion.contains('bihar') ||
+          normalizedRegion.contains('jharkhand') ||
+          normalizedRegion.contains('punjab') ||
+          normalizedRegion.contains('haryana') ||
+          normalizedRegion.contains('delhi') ||
+          normalizedRegion.contains('madhya pradesh') ||
+          normalizedRegion.contains('chhattisgarh') ||
+          normalizedRegion.contains('west bengal') ||
+          normalizedRegion.contains('odisha') ||
+          normalizedRegion.contains('assam') ||
+          normalizedRegion.contains('uttarakhand'))) {
+    return _fallback('regional-plains', 'River plains', WorldBiome.river,
+        latitude, longitude);
+  }
+
+  // Deccan plateau: Maharashtra, Karnataka, Telangana, Andhra Pradesh.
+  if (isIndia &&
+      (normalizedRegion.contains('maharashtra') ||
+          normalizedRegion.contains('karnataka') ||
+          normalizedRegion.contains('telangana') ||
+          normalizedRegion.contains('andhra pradesh') ||
+          normalizedRegion.contains('goa'))) {
+    return _fallback('regional-deccan', 'Deccan frontier',
         WorldBiome.tropical, latitude, longitude);
   }
-  return _fallback('regional-frontier', 'Regional frontier',
-      WorldBiome.temperate, latitude, longitude);
+
+  // Country-driven climate zone. This decides the visual scene more than the
+  // region string does for non-catalog cities.
+  final zone = climateZoneFor(
+    latitude: latitude,
+    country: region,
+    biome: null,
+  );
+
+  switch (zone) {
+    case ClimateZone.subtropicalDesert:
+      return _fallback('regional-desert', 'Desert frontier', WorldBiome.desert,
+          latitude, longitude);
+    case ClimateZone.alpine:
+      return _fallback('regional-alpine', 'Alpine frontier',
+          WorldBiome.mountain, latitude, longitude);
+    case ClimateZone.boreal:
+      return _fallback('regional-boreal', 'Boreal frontier',
+          WorldBiome.mountain, latitude, longitude);
+    case ClimateZone.tundra:
+    case ClimateZone.polar:
+      return _fallback('regional-tundra', 'Tundra frontier',
+          WorldBiome.coldDesert, latitude, longitude);
+    case ClimateZone.tropicalRainforest:
+      return _fallback('regional-tropical', 'Tropical frontier',
+          WorldBiome.tropical, latitude, longitude);
+    case ClimateZone.tropicalSavanna:
+      return _fallback('regional-savanna', 'Savanna frontier',
+          WorldBiome.tropical, latitude, longitude);
+    case ClimateZone.mediterranean:
+      return _fallback('regional-mediterranean', 'Coastal frontier',
+          WorldBiome.coastal, latitude, longitude);
+    case ClimateZone.temperateDeciduous:
+      // Temperate is the most common case, so it further splits by likelihood
+      // of the city being urban, coastal, or inland.
+      if (normalizedRegion.contains('united states') ||
+          normalizedRegion.contains('united kingdom') ||
+          normalizedRegion.contains('germany') ||
+          normalizedRegion.contains('france') ||
+          normalizedRegion.contains('japan') ||
+          normalizedRegion.contains('china')) {
+        return _fallback('regional-urban', 'Urban frontier', WorldBiome.urban,
+            latitude, longitude);
+      }
+      return _fallback('regional-temperate', 'Temperate frontier',
+          WorldBiome.river, latitude, longitude);
+  }
 }
 
 WorldLocation _fallback(String id, String name, WorldBiome biome,

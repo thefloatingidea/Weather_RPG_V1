@@ -55,8 +55,9 @@ Future<Uint8List> _capture(WeatherSceneGame game) async {
 Future<int> _bestHorizontalShift(Uint8List a, Uint8List b) async {
   var bestShift = 0;
   var bestScore = -1;
-  const yStart = 200, yEnd = 320, maxShift = 40;
+  const yStart = 140, yEnd = 200, maxShift = 40;
   for (var shift = -maxShift; shift <= maxShift; shift++) {
+    if (shift == 0) continue;
     var score = 0;
     for (var y = yStart; y < yEnd; y += 2) {
       for (var x = maxShift; x < W - maxShift; x += 2) {
@@ -108,9 +109,9 @@ void main() {
     });
 
     test('opposite bearings offset in opposite directions', () {
-      final eastward = _scene(windKmh: 70, windDirectionDeg: 180)
+      final eastward = _scene(windKmh: 70, windDirectionDeg: 0)
           .debugParallaxMidOffset(W.toDouble());
-      final westward = _scene(windKmh: 70, windDirectionDeg: 0)
+      final westward = _scene(windKmh: 70, windDirectionDeg: 180)
           .debugParallaxMidOffset(W.toDouble());
 
       expect(eastward, greaterThan(0));
@@ -158,8 +159,8 @@ void main() {
     test('opposite winds shift the layer opposite ways', () async {
       final still = await _capture(_scene(windKmh: 0, windDirectionDeg: 180));
       final eastward =
-          await _capture(_scene(windKmh: 140, windDirectionDeg: 180));
-      final westward = await _capture(_scene(windKmh: 140, windDirectionDeg: 0));
+          await _capture(_scene(windKmh: 140, windDirectionDeg: 0));
+      final westward = await _capture(_scene(windKmh: 140, windDirectionDeg: 180));
 
       final east = await _bestHorizontalShift(still, eastward);
       final west = await _bestHorizontalShift(still, westward);

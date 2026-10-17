@@ -46,3 +46,11 @@ app.*.map.json
 
 # Widget Preview related
 .widget_preview/
+
+# Cloudflare Wrangler
+proxy/.wrangler/
+.wrangler/
+
+# Patch and backup files
+*.patch
+android_backup/

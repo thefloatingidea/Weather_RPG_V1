@@ -26,7 +26,11 @@ class WeatherFeedback {
 
     await _player.stop();
     if (track != null) {
-      await _player.play(AssetSource(track), volume: 0.35);
+      try {
+        await _player.play(AssetSource(track), volume: 0.35);
+      } catch (_) {
+        // Fallback safely if audio assets are missing
+      }
     }
   }
 

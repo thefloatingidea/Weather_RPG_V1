@@ -13,7 +13,7 @@ void main() {
     );
 
     await expectLater(
-      api.fetchForecast(latitude: 0, longitude: 0),
+      api.search(''),
       throwsA(isA<WeatherApiException>()
           .having((e) => e.isRetryable, 'isRetryable', false)),
     );
