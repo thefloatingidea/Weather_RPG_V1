@@ -12,6 +12,7 @@ import 'character_behavior.dart';
 import 'goblin_sprites.dart';
 import 'goblin_scenarios.dart';
 import 'local_markers.dart';
+import 'world_detail.dart';
 
 ui.Color weatherSceneSkyColor({
   required bool isDay,
@@ -412,6 +413,12 @@ class WeatherSceneGame extends FlameGame with TapCallbacks, LongPressCallbacks {
   bool get _winterSeason =>
       _live && location.seasonalFoliage && _season == WorldSeason.winter;
   double get _environmentMotionScale => reduceMotion ? .32 : 1.0;
+
+  /// Stable per-place seed for decorative detail (see world_detail.dart).
+  /// Fallback places share ids per zone ('regional-desert'...), so the
+  /// coordinates are mixed in to keep neighbouring places different.
+  int get _detailSeed => detailSeed(
+      '${location.id}|${location.latitude.toStringAsFixed(1)}|${location.longitude.toStringAsFixed(1)}');
   bool get _cold => _live && (_snow || temperatureC <= 12);
   bool get _autumnWorld =>
       _live && location.seasonalFoliage && _season == WorldSeason.autumn;
@@ -1372,6 +1379,22 @@ class WeatherSceneGame extends FlameGame with TapCallbacks, LongPressCallbacks {
     canvas.save();
     canvas.translate(midOffset, 0);
     _drawTerrainDetails(canvas, w, h);
+    if (!_flood) {
+      paintBiomeGroundDetail(
+        canvas,
+        WorldDetailContext(
+          w: w,
+          h: h,
+          seed: _detailSeed,
+          biome: location.biome,
+          arid: location.isArid || _sandstorm,
+          winter: _winterWorld,
+          storm: _storm,
+          elapsed: _elapsed * _environmentMotionScale,
+          zone: location.climate,
+        ),
+      );
+    }
     
     if (debugHiddenLayers != DebugSceneLayers.withoutLandmark && debugHiddenLayers != DebugSceneLayers.withoutLandmarkAndCharacter) {
       if (location.landmark != WorldLandmark.none) {
@@ -3777,6 +3800,12 @@ class WeatherSceneGame extends FlameGame with TapCallbacks, LongPressCallbacks {
         final x = w * ((i * 37 % 97) / 100);
         final y = h * (.035 + (i * 19 % 37) / 100);
         final r = i % 7 == 0 ? 1.8 : 1.0;
+        // Each star breathes at its own pace; calm when motion is reduced.
+        final twinkle = reduceMotion
+            ? 1.0
+            : .62 + .38 * math.sin(_elapsed * (1.1 + (i % 5) * .35) + i * 1.7);
+        starPaint.color =
+            ui.Color.fromARGB((0xCC * twinkle).round().clamp(0, 255), 0xED, 0xF5, 0xFF);
         canvas.drawCircle(ui.Offset(x, y), r, starPaint);
       }
     }
@@ -5383,6 +5412,16 @@ class WeatherSceneGame extends FlameGame with TapCallbacks, LongPressCallbacks {
         lanternLit ? const ui.Color(0xFFFFC857) : const ui.Color(0xFF79543A));
     _rect(canvas, lantern.dx - unit * .5, lantern.dy - unit, unit, unit * 2,
         lanternLit ? const ui.Color(0xFFFFF1A8) : const ui.Color(0xFFB08A56));
+    if (lanternLit &&
+        !_rain &&
+        !_windy &&
+        !_fog &&
+        !_winterWorld &&
+        !_cyclone &&
+        !_flood) {
+      paintLanternMoths(
+          canvas, lantern, unit, _elapsed * _environmentMotionScale, _detailSeed);
+    }
 
     if (_heatStress || _sunBeamActive) {
       final heatProgress = _sunHeatProgress;

@@ -1,5 +1,8 @@
 import 'dart:convert';
 
+import 'climate_boxes.dart';
+import 'world_catalog_extra.dart';
+
 enum WorldBiome {
   tropical,
   coastal,
@@ -83,6 +86,7 @@ class WorldLocation {
     required this.biome,
     required this.landmark,
     this.seasonalFoliage = false,
+    this.climateOverride,
   });
 
   final String id;
@@ -95,6 +99,10 @@ class WorldLocation {
   final WorldLandmark landmark;
   final bool seasonalFoliage;
 
+  /// Set for places outside the catalog, where the climate was already decided
+  /// while resolving the place (the country is not known to the fallback).
+  final ClimateZone? climateOverride;
+
   bool get isTropical => biome == WorldBiome.tropical;
   bool get isArid =>
       biome == WorldBiome.desert || biome == WorldBiome.coldDesert;
@@ -104,7 +112,9 @@ class WorldLocation {
 /// coordinates and country. Kept as an extension so existing catalog entries
 /// and the fallback constructor stay untouched.
 extension WorldLocationClimate on WorldLocation {
-  ClimateZone get climate => climateZoneFor(
+  ClimateZone get climate =>
+      climateOverride ??
+      climateZoneFor(
         latitude: latitude,
         country: country,
         biome: biome,
@@ -533,6 +543,7 @@ const worldLocations = <WorldLocation>[
       longitude: 103.8198,
       biome: WorldBiome.tropical,
       landmark: WorldLandmark.singaporeSkyline),
+  ...extraWorldLocations,
 ];
 
 /// A location the user has saved to their Places list.
@@ -819,11 +830,12 @@ WorldLocation resolveWorldLocation({
 
   // Country-driven climate zone. This decides the visual scene more than the
   // region string does for non-catalog cities.
-  final zone = climateZoneFor(
-    latitude: latitude,
-    country: region,
-    biome: null,
-  );
+  final zone = climateZoneByBox(latitude, longitude) ??
+      climateZoneFor(
+        latitude: latitude,
+        country: region,
+        biome: null,
+      );
 
   switch (zone) {
     case ClimateZone.subtropicalDesert:
@@ -878,4 +890,19 @@ WorldLocation _fallback(String id, String name, WorldBiome biome,
       landmark: WorldLandmark.none,
       seasonalFoliage:
           biome == WorldBiome.temperate || biome == WorldBiome.mountain,
+      climateOverride: _zoneForFallback(id, latitude),
     );
+
+/// The climate each fallback id stands for, so trees and ground detail match
+/// the zone chosen in [resolveWorldLocation] and not just the latitude.
+ClimateZone _zoneForFallback(String id, double latitude) => switch (id) {
+      'regional-desert' => ClimateZone.subtropicalDesert,
+      'regional-mountain' || 'regional-alpine' => ClimateZone.alpine,
+      'regional-coast' || 'regional-tropical' => ClimateZone.tropicalRainforest,
+      'regional-savanna' => ClimateZone.tropicalSavanna,
+      'regional-mediterranean' => ClimateZone.mediterranean,
+      'regional-boreal' => ClimateZone.boreal,
+      'regional-tundra' =>
+        latitude.abs() >= 72 ? ClimateZone.polar : ClimateZone.tundra,
+      _ => ClimateZone.temperateDeciduous,
+    };

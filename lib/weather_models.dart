@@ -1,3 +1,5 @@
+import 'hourly_insights.dart';
+
 export 'widgets/city_search_page.dart';
 
 /// Weather normalized to the app's internal shape from WeatherAPI.com.
@@ -88,7 +90,10 @@ class WeatherBundle {
       'wind_direction_10m': number(currentSource, 'wind_degree'),
       'cloud_cover': number(currentSource, 'cloud'),
       'visibility': number(currentSource, 'vis_km') * 1000,
+      'uv_index': number(currentSource, 'uv'),
     };
+    final airQuality = parseAirQuality(currentSource['air_quality']);
+    if (airQuality != null) current['air_quality'] = airQuality;
 
     final hours = <Map<String, dynamic>>[
       for (final day in forecastDays)
@@ -105,6 +110,12 @@ class WeatherBundle {
       'precipitation_probability':
           hours.map((hour) => number(hour, 'chance_of_rain').round()).toList(),
       'weather_code': hours.map(conditionCode).toList(),
+      'apparent_temperature':
+          hours.map((hour) => number(hour, 'feelslike_c')).toList(),
+      'wind_speed_10m': hours.map((hour) => number(hour, 'wind_kph')).toList(),
+      'relative_humidity_2m':
+          hours.map((hour) => number(hour, 'humidity')).toList(),
+      'uv_index': hours.map((hour) => number(hour, 'uv')).toList(),
     };
     final daily = <String, dynamic>{
       'time': days.map((entry) => entry.source['date']).toList(),
@@ -123,6 +134,17 @@ class WeatherBundle {
           days.map((entry) => asMap(entry.source['astro'])['sunrise']).toList(),
       'sunset':
           days.map((entry) => asMap(entry.source['astro'])['sunset']).toList(),
+      'moonrise':
+          days.map((entry) => asMap(entry.source['astro'])['moonrise']).toList(),
+      'moonset':
+          days.map((entry) => asMap(entry.source['astro'])['moonset']).toList(),
+      'moon_phase': days
+          .map((entry) => asMap(entry.source['astro'])['moon_phase'])
+          .toList(),
+      'moon_illumination': days
+          .map((entry) => parseIllumination(
+              asMap(entry.source['astro'])['moon_illumination']))
+          .toList(),
     };
     return WeatherBundle(current: current, hourly: hourly, daily: daily);
   }

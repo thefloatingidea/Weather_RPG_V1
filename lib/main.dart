@@ -10,6 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'weather_scene.dart';
 import 'goblin_sprites.dart';
 import 'weather_models.dart';
+import 'hourly_insights.dart';
 import 'world_catalog.dart';
 import 'weather_rules.dart';
 import 'character_behavior.dart';
@@ -488,6 +489,7 @@ class _WeatherHomeState extends State<WeatherHome>
   bool _loading = true;
   Object? _error;
   int _tab = 0;
+  HourlyMetric _hourlyMetric = HourlyMetric.rain;
   String _city = 'Mumbai';
   String _region = 'Maharashtra, India';
   double _lat = 19.0760;
@@ -2083,7 +2085,7 @@ Text(
   }
 
   Widget _hourlyScreen(WeatherBundle w, bool isDark) {
-    final palette = _menuPalette(isDark);
+    final airCard = _airQualityCard(w, isDark);
     return ListView(
       padding: const EdgeInsets.fromLTRB(14, 8, 14, 22),
       children: [
@@ -2091,46 +2093,413 @@ Text(
         const SizedBox(height: 16),
         _hourlyStrip(w, isDark, count: 24),
         const SizedBox(height: 18),
-        _pixelPanel(
-          isDark: isDark,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+        _hourlyMetricCard(w, isDark),
+        const SizedBox(height: 18),
+        _sectionHeader('SKY & AIR', 'REFRESH', _fetchWeather),
+        const SizedBox(height: 8),
+        _sunMoonCard(w, isDark),
+        if (airCard != null) ...[
+          const SizedBox(height: 14),
+          airCard,
+        ],
+      ],
+    );
+  }
+
+  // ---- Hourly metric chart ------------------------------------------------
+
+  Widget _hourlyMetricCard(WeatherBundle w, bool isDark) {
+    final palette = _menuPalette(isDark);
+    final times = w.hourly['time'] as List<dynamic>;
+    final available = HourlyMetric.values.where((m) {
+      final list = w.hourly[m.key];
+      return list is List && list.length == times.length && list.isNotEmpty;
+    }).toList();
+    if (available.isEmpty) return const SizedBox.shrink();
+    final metric =
+        available.contains(_hourlyMetric) ? _hourlyMetric : available.first;
+
+    final start = _firstFutureHour(times);
+    final end = math.min(start + 24, times.length);
+    final source = w.hourly[metric.key] as List<dynamic>;
+    final values = <double>[];
+    final labels = <String>[];
+    for (var i = start; i < end; i++) {
+      final raw = (source[i] as num?)?.toDouble() ?? 0;
+      values.add(metric.isTemperature && _fahrenheit ? raw * 9 / 5 + 32 : raw);
+      labels.add(_hourLabel(DateTime.tryParse(times[i].toString())));
+    }
+    final unit = metric.isTemperature ? (_fahrenheit ? '°F' : '°C') : metric.unit;
+
+    String fmt(double v) => switch (metric) {
+          HourlyMetric.temp || HourlyMetric.feels => '${v.round()}°',
+          HourlyMetric.rain || HourlyMetric.humidity => '${v.round()}%',
+          HourlyMetric.wind => '${v.round()} km/h',
+          HourlyMetric.uv => '${v.round()} (${uvCategory(v)})',
+        };
+
+    String summary = '';
+    if (values.isNotEmpty) {
+      var hiI = 0;
+      var loI = 0;
+      for (var i = 1; i < values.length; i++) {
+        if (values[i] > values[hiI]) hiI = i;
+        if (values[i] < values[loI]) loI = i;
+      }
+      if (metric == HourlyMetric.rain) {
+        summary = values[hiI] <= 0
+            ? 'No rain expected in the next 24 hours'
+            : 'Peak ${fmt(values[hiI])} around ${labels[hiI]}';
+      } else if (metric == HourlyMetric.uv) {
+        summary = 'Peak UV ${fmt(values[hiI])} around ${labels[hiI]}';
+      } else {
+        summary = 'High ${fmt(values[hiI])} at ${labels[hiI]}'
+            '  ·  Low ${fmt(values[loI])} at ${labels[loI]}';
+      }
+    }
+
+    final range = values.isEmpty ? (0.0, 1.0) : _metricRange(metric, values);
+
+    return _pixelPanel(
+      isDark: isDark,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('${metric.label.toUpperCase()} BY HOUR',
+              style: TextStyle(
+                  color: palette.accent,
+                  fontWeight: FontWeight.w900,
+                  fontSize: 12)),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
             children: [
-              Text('RAIN CHANCE BY HOUR',
+              for (final m in available)
+                _metricChip(m, m == metric, palette),
+            ],
+          ),
+          const SizedBox(height: 14),
+          SizedBox(
+            height: 150,
+            child: CustomPaint(
+              painter: HourlyMetricChartPainter(
+                values: values,
+                xLabels: labels,
+                color: palette.accent,
+                grid: palette.grid,
+                textColor: palette.muted,
+                pointCenter: palette.frameBottom,
+                minValue: range.$1,
+                maxValue: range.$2,
+              ),
+              child: const SizedBox.expand(),
+            ),
+          ),
+          const SizedBox(height: 8),
+          if (summary.isNotEmpty)
+            Text(summary,
+                style: TextStyle(
+                    color: palette.text,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700)),
+          const SizedBox(height: 3),
+          Text(
+              metric == HourlyMetric.rain
+                  ? 'Probability of precipitation (%)'
+                  : '${metric.label}${unit.isEmpty ? '' : ' ($unit)'}',
+              style: TextStyle(color: palette.muted, fontSize: 11)),
+        ],
+      ),
+    );
+  }
+
+  (double, double) _metricRange(HourlyMetric metric, List<double> values) {
+    final fixed = metric.fixedMax;
+    if (fixed != null) return (0, fixed);
+    final lo = values.reduce(math.min);
+    final hi = values.reduce(math.max);
+    if (metric.isTemperature) {
+      var a = lo.floorToDouble() - 1;
+      var b = hi.ceilToDouble() + 1;
+      if (b - a < 6) {
+        final mid = (a + b) / 2;
+        a = mid - 3;
+        b = mid + 3;
+      }
+      return (a, b);
+    }
+    final floor = metric == HourlyMetric.uv ? 6.0 : 10.0;
+    return (0, math.max(hi.ceilToDouble(), floor));
+  }
+
+  Widget _metricChip(
+      HourlyMetric metric, bool selected, _WeatherMenuPalette palette) {
+    return Semantics(
+      button: true,
+      selected: selected,
+      label: '${metric.label} chart',
+      child: GestureDetector(
+        onTap: () => setState(() => _hourlyMetric = metric),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          decoration: BoxDecoration(
+            color: selected
+                ? palette.accent.withValues(alpha: .22)
+                : Colors.transparent,
+            border:
+                Border.all(color: selected ? palette.accent : palette.edge),
+            borderRadius: BorderRadius.circular(4),
+          ),
+          child: Text(metric.label,
+              style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w800,
+                  color: selected ? palette.accent : palette.muted)),
+        ),
+      ),
+    );
+  }
+
+  // ---- Sun & moon ---------------------------------------------------------
+
+  Widget _sunMoonCard(WeatherBundle w, bool isDark) {
+    final palette = _menuPalette(isDark);
+    final d = w.daily;
+    String? first(String key) {
+      final list = d[key];
+      return list is List && list.isNotEmpty ? list.first?.toString() : null;
+    }
+
+    final sun = SunPosition.tryCreate(
+      sunrise: first('sunrise'),
+      sunset: first('sunset'),
+      localTime: w.current['time']?.toString(),
+    );
+    final phase = first('moon_phase');
+    final illumRaw = d['moon_illumination'];
+    final illum = illumRaw is List && illumRaw.isNotEmpty
+        ? parseIllumination(illumRaw.first)
+        : null;
+    final moonrise = parseClockMinutes(first('moonrise'));
+    final moonset = parseClockMinutes(first('moonset'));
+    if (sun == null && phase == null) return const SizedBox.shrink();
+
+    Widget stat(String label, String value) => Expanded(
+          child: Column(
+            children: [
+              Text(label,
+                  style: TextStyle(color: palette.muted, fontSize: 10)),
+              const SizedBox(height: 2),
+              Text(value,
                   style: TextStyle(
-                      color: palette.accent,
-                      fontWeight: FontWeight.w900,
-                      fontSize: 12)),
-              const SizedBox(height: 15),
-              SizedBox(
-                height: 120,
-                child: CustomPaint(
-                  painter: RainChartPainter(
-                    values: (w.hourly['precipitation_probability']
-                            as List<dynamic>)
-                        .skip(
-                            _firstFutureHour(w.hourly['time'] as List<dynamic>))
-                        .take(12)
-                        .map((v) => (v as num).toDouble())
-                        .toList(),
-                    color: palette.accent,
-                    grid: palette.grid,
-                    pointCenter: palette.frameBottom,
-                  ),
-                  child: const SizedBox.expand(),
+                      color: palette.text,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w800)),
+            ],
+          ),
+        );
+
+    return _pixelPanel(
+      isDark: isDark,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('SUN & MOON',
+              style: TextStyle(
+                  color: palette.accent,
+                  fontWeight: FontWeight.w900,
+                  fontSize: 12)),
+          if (sun != null) ...[
+            const SizedBox(height: 12),
+            SizedBox(
+              height: 92,
+              width: double.infinity,
+              child: CustomPaint(
+                painter: SunArcPainter(
+                  progress: sun.progress,
+                  arc: palette.grid,
+                  done: palette.accent,
+                  sun: palette.highlight,
                 ),
               ),
-              const SizedBox(height: 10),
-              Text('Probability of precipitation (%)',
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                stat('Sunrise', formatMinutes(sun.sunriseMinutes)),
+                stat('Day length', formatDuration(sun.dayLengthMinutes)),
+                stat('Sunset', formatMinutes(sun.sunsetMinutes)),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Center(
+              child: Text(sun.status,
+                  style: TextStyle(color: palette.muted, fontSize: 11)),
+            ),
+          ],
+          if (sun != null && phase != null) ...[
+            const SizedBox(height: 12),
+            Divider(height: 1, color: palette.edge.withValues(alpha: .6)),
+            const SizedBox(height: 12),
+          ] else
+            const SizedBox(height: 12),
+          if (phase != null)
+            Row(
+              children: [
+                Text(moonEmoji(phase), style: const TextStyle(fontSize: 34)),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(phase,
+                          style: TextStyle(
+                              color: palette.text,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w800)),
+                      const SizedBox(height: 2),
+                      Text(
+                          illum == null
+                              ? 'Illumination unavailable'
+                              : '$illum% illuminated',
+                          style:
+                              TextStyle(color: palette.muted, fontSize: 11)),
+                    ],
+                  ),
+                ),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Text(
+                        'Rises ${moonrise == null ? '—' : formatMinutes(moonrise)}',
+                        style: TextStyle(color: palette.muted, fontSize: 11)),
+                    const SizedBox(height: 2),
+                    Text(
+                        'Sets ${moonset == null ? '—' : formatMinutes(moonset)}',
+                        style: TextStyle(color: palette.muted, fontSize: 11)),
+                  ],
+                ),
+              ],
+            ),
+        ],
+      ),
+    );
+  }
+
+  // ---- Air quality --------------------------------------------------------
+
+  static const _aqiColors = <Color>[
+    Color(0xFF6BBF59),
+    Color(0xFFE6C84F),
+    Color(0xFFE8913A),
+    Color(0xFFD9534F),
+    Color(0xFF9B59B6),
+    Color(0xFF7E2B3A),
+  ];
+
+  /// Returns null when the forecast carries no air quality block (for
+  /// example when the proxy has not been redeployed with `aqi=yes`).
+  Widget? _airQualityCard(WeatherBundle w, bool isDark) {
+    final raw = w.current['air_quality'];
+    if (raw is! Map) return null;
+    final band = aqiBandFor(raw['us_epa_index']);
+    if (band == null) return null;
+    final palette = _menuPalette(isDark);
+    final bandColor = _aqiColors[band.index - 1];
+
+    Widget pollutant(String label, String key) {
+      final value = raw[key];
+      return Container(
+        width: 74,
+        padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 6),
+        decoration: BoxDecoration(
+          border: Border.all(color: palette.edge),
+          borderRadius: BorderRadius.circular(4),
+          color: palette.surface.withValues(alpha: .5),
+        ),
+        child: Column(
+          children: [
+            Text(label, style: TextStyle(color: palette.muted, fontSize: 10)),
+            const SizedBox(height: 3),
+            Text(_number(value),
+                style: TextStyle(
+                    color: palette.text,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w900)),
+          ],
+        ),
+      );
+    }
+
+    return _pixelPanel(
+      isDark: isDark,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('AIR QUALITY',
+              style: TextStyle(
+                  color: palette.accent,
+                  fontWeight: FontWeight.w900,
+                  fontSize: 12)),
+          const SizedBox(height: 10),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Container(
+                width: 12,
+                height: 12,
+                decoration: BoxDecoration(
+                    color: bandColor, borderRadius: BorderRadius.circular(3)),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(band.label,
+                    style: TextStyle(
+                        color: palette.text,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w900)),
+              ),
+              Text('${band.index} / 6',
                   style: TextStyle(color: palette.muted, fontSize: 11)),
             ],
           ),
-        ),
-        const SizedBox(height: 18),
-        _sectionHeader('NEXT 24 HOURS', 'REFRESH', _fetchWeather),
-        const SizedBox(height: 8),
-        _hourlyStrip(w, isDark, count: 24),
-      ],
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              for (var i = 0; i < 6; i++)
+                Expanded(
+                  child: Container(
+                    height: i == band.index - 1 ? 12 : 7,
+                    margin: const EdgeInsets.symmetric(horizontal: 1.5),
+                    decoration: BoxDecoration(
+                      color: _aqiColors[i]
+                          .withValues(alpha: i == band.index - 1 ? 1 : .45),
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Text(band.advice,
+              style: TextStyle(color: palette.muted, fontSize: 12)),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              if (raw['pm2_5'] != null) pollutant('PM2.5', 'pm2_5'),
+              if (raw['pm10'] != null) pollutant('PM10', 'pm10'),
+              if (raw['o3'] != null) pollutant('O₃', 'o3'),
+              if (raw['no2'] != null) pollutant('NO₂', 'no2'),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text('US EPA scale · pollutants in µg/m³',
+              style: TextStyle(color: palette.muted, fontSize: 10)),
+        ],
+      ),
     );
   }
 
@@ -3275,4 +3644,198 @@ class RainChartPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant RainChartPainter oldDelegate) =>
       oldDelegate.values != values;
+}
+
+
+/// Line chart for any hourly metric, with y-axis values and hour labels.
+class HourlyMetricChartPainter extends CustomPainter {
+  HourlyMetricChartPainter({
+    required this.values,
+    required this.xLabels,
+    required this.color,
+    required this.grid,
+    required this.textColor,
+    required this.pointCenter,
+    required this.minValue,
+    required this.maxValue,
+  });
+
+  final List<double> values;
+  final List<String> xLabels;
+  final Color color;
+  final Color grid;
+  final Color textColor;
+  final Color pointCenter;
+  final double minValue;
+  final double maxValue;
+
+  void _text(Canvas canvas, String text, Offset anchor,
+      {bool centerX = false, bool rightAlign = false}) {
+    final painter = TextPainter(
+      text: TextSpan(
+          text: text, style: TextStyle(color: textColor, fontSize: 9.5)),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    var dx = anchor.dx;
+    if (centerX) dx -= painter.width / 2;
+    if (rightAlign) dx -= painter.width;
+    painter.paint(canvas, Offset(dx, anchor.dy - painter.height / 2));
+  }
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    const left = 34.0;
+    const right = 8.0;
+    const top = 8.0;
+    const bottom = 20.0;
+    final chart = Rect.fromLTRB(left, top, size.width - right, size.height - bottom);
+    if (chart.width <= 0 || chart.height <= 0) return;
+    final span = (maxValue - minValue).abs() < 0.001 ? 1.0 : maxValue - minValue;
+
+    final gridPaint = Paint()
+      ..color = grid
+      ..strokeWidth = 1;
+    for (var i = 0; i < 4; i++) {
+      final y = chart.top + chart.height * i / 3;
+      canvas.drawLine(Offset(chart.left, y), Offset(chart.right, y), gridPaint);
+      final v = maxValue - span * i / 3;
+      _text(canvas, span >= 6 ? v.round().toString() : v.toStringAsFixed(1),
+          Offset(chart.left - 6, y),
+          rightAlign: true);
+    }
+    if (values.isEmpty) return;
+
+    Offset pointAt(int i) {
+      final x = values.length == 1
+          ? chart.center.dx
+          : chart.left + chart.width * i / (values.length - 1);
+      final t = ((values[i] - minValue) / span).clamp(0.0, 1.0);
+      return Offset(x, chart.bottom - t * chart.height);
+    }
+
+    final points = [for (var i = 0; i < values.length; i++) pointAt(i)];
+    final path = Path()..moveTo(points.first.dx, points.first.dy);
+    for (final p in points.skip(1)) {
+      path.lineTo(p.dx, p.dy);
+    }
+    final fill = Path.from(path)
+      ..lineTo(points.last.dx, chart.bottom)
+      ..lineTo(points.first.dx, chart.bottom)
+      ..close();
+    canvas.drawPath(
+      fill,
+      Paint()
+        ..shader = LinearGradient(
+          colors: [color.withValues(alpha: .30), color.withValues(alpha: .01)],
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+        ).createShader(chart),
+    );
+    canvas.drawPath(
+      path,
+      Paint()
+        ..color = color
+        ..strokeWidth = 2.5
+        ..style = PaintingStyle.stroke
+        ..strokeJoin = StrokeJoin.round,
+    );
+
+    var peak = 0;
+    for (var i = 1; i < values.length; i++) {
+      if (values[i] > values[peak]) peak = i;
+    }
+    final dense = values.length > 13;
+    for (var i = 0; i < points.length; i++) {
+      if (dense && i != 0 && i != peak) continue;
+      canvas.drawCircle(points[i], 3.5, Paint()..color = color);
+      canvas.drawCircle(points[i], 1.5, Paint()..color = pointCenter);
+    }
+
+    final step = math.max(1, (values.length / 5).ceil());
+    for (var i = 0; i < xLabels.length && i < points.length; i += step) {
+      _text(canvas, xLabels[i], Offset(points[i].dx, size.height - 6),
+          centerX: true);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant HourlyMetricChartPainter old) =>
+      old.values != values ||
+      old.minValue != minValue ||
+      old.maxValue != maxValue ||
+      old.color != color ||
+      old.grid != grid ||
+      old.textColor != textColor ||
+      old.xLabels != xLabels;
+}
+
+/// Half-ellipse sun path from sunrise (left) to sunset (right).
+class SunArcPainter extends CustomPainter {
+  SunArcPainter({
+    required this.progress,
+    required this.arc,
+    required this.done,
+    required this.sun,
+  });
+
+  /// 0..1 while the sun is up; null at night.
+  final double? progress;
+  final Color arc;
+  final Color done;
+  final Color sun;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final baseline = size.height - 6;
+    final arcHeight = baseline - 8;
+    if (arcHeight <= 0 || size.width < 40) return;
+    final rect =
+        Rect.fromLTRB(14, 8, size.width - 14, 8 + arcHeight * 2);
+
+    canvas.drawLine(
+      Offset(4, baseline),
+      Offset(size.width - 4, baseline),
+      Paint()
+        ..color = arc
+        ..strokeWidth = 1,
+    );
+    canvas.drawArc(
+      rect,
+      math.pi,
+      math.pi,
+      false,
+      Paint()
+        ..color = arc
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2,
+    );
+
+    final t = progress;
+    if (t == null) return;
+    canvas.drawArc(
+      rect,
+      math.pi,
+      math.pi * t,
+      false,
+      Paint()
+        ..color = done
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 3
+        ..strokeCap = StrokeCap.round,
+    );
+    final angle = math.pi + math.pi * t;
+    final center = Offset(
+      rect.center.dx + rect.width / 2 * math.cos(angle),
+      rect.center.dy + rect.height / 2 * math.sin(angle),
+    );
+    canvas.drawCircle(center, 11, Paint()..color = sun.withValues(alpha: .28));
+    canvas.drawCircle(center, 6.5, Paint()..color = sun);
+  }
+
+  @override
+  bool shouldRepaint(covariant SunArcPainter old) =>
+      old.progress != progress ||
+      old.arc != arc ||
+      old.done != done ||
+      old.sun != sun;
 }

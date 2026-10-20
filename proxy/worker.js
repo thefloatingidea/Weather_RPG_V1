@@ -31,7 +31,7 @@ async function handleForecast(url, env) {
   upstream.searchParams.set('key', env.WEATHER_API_KEY);
   upstream.searchParams.set('q', q);
   upstream.searchParams.set('days', days);
-  upstream.searchParams.set('aqi', 'no');
+  upstream.searchParams.set('aqi', 'yes');
   upstream.searchParams.set('alerts', 'no');
 
   const res = await fetch(upstream, { cf: { cacheTtl: 600 } });
